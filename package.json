@@ -1,0 +1,14 @@
+{
+  "name": "edu-quiz-practice",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "init": "node db.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^4.21.2"
+  }
+}

@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+
+# 运行时数据库（可由 npm run init + 套题管理导入重建）
+quiz.db
+quiz.db-*
+*.db.bak-*
+
+# 进程与日志
+.server.pid
+*.log
+
+# 系统与本地工具缓存
+.DS_Store
+.dsh-project-memory/
+.workbuddy/
+
+# 早期独立原型稿，不参与运行
+deepseek_html_*.html
+
+# 环境变量
+.env
+.env.*
