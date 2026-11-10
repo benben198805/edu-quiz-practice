@@ -22,7 +22,8 @@ v2/
 ├── db.js                  开库、建表、schema 迁移（含旧库升级）
 ├── public/index.html      唯一前端文件：样式、页面、全部交互
 ├── papers_data/           题目源 JSON（paper-01.json … paper-20.json）
-├── quiz.db                SQLite 数据库（运行时数据，不纳入 git）
+├── quiz.db                SQLite 数据库（纳入 git；提交前先停服或 checkpoint）
+├── quiz.db-wal / -shm     WAL 临时文件（不纳入 git）
 ├── quiz.db.bak-*          某次迁移前的备份，确认无误后可删
 ├── restart.sh             服务重启脚本（占用则先停再启）
 ├── server.log             由 restart.sh 写入的服务日志（不纳入 git）
@@ -69,6 +70,7 @@ npm run init             # node db.js，建表/迁移 schema（空库时用）
 3. **同名导入 = 覆盖题目**：按 `(paper_id, seq)` upsert，并删除尾部多余题号；已产生的历史按快照展示，不受影响。
 4. 时间统一用 `datetime('now','localtime')`；分数用 REAL，前端 `formatScore()` 负责四舍五入到 1 位小数。
 5. 旧库迁移在 `db.js` 的 `initSchema()` 中自动完成（补 `paper_name`、重建 `answers` 并回填快照），重复执行安全。
+6. `quiz.db` 是纳入 git 的二进制文件，`-wal`/`-shm` 被忽略。提交数据库前先停服（`kill "$(cat .server.pid)"`），确认 WAL 已合并、`PRAGMA integrity_check` 为 ok，再 `git add quiz.db`；运行中直接提交可能缺少 WAL 里尚未 checkpoint 的事务。重启用 `./restart.sh`。
 
 ## 核心功能
 

@@ -1,8 +1,7 @@
 # 依赖
 node_modules/
 
-# 运行时数据库（可由 npm run init + 套题管理导入重建）
-quiz.db
+# 运行时数据库：主库纳入 git；WAL/SHM 与迁移备份不纳入
 quiz.db-*
 *.db.bak-*
 
