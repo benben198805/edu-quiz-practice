@@ -54,6 +54,14 @@ npm run init             # node db.js，建表/迁移 schema（空库时用）
 - 隔离测试：支持 `QUIZ_DB_PATH=/tmp/quiz-test.db PORT=3101 node server.js`，不会动真实库。
 - 改完代码需执行 `./restart.sh`，Express 不热重载。
 
+## 部署（Vercel）
+
+- 零配置部署：`server.js` 位于根目录并 `module.exports = app`；只有本地 `node server.js` 才 `app.listen`。
+- 函数目录 `/var/task` 只读：`db.js` 在 `VERCEL=1` 时把随包发布的 `quiz.db` 复制到 `/tmp/quiz.db` 再以 WAL 打开（`QUIZ_DB_PATH` 可覆盖，优先级最高）。
+- `express.static()` 在 Vercel 上被忽略：`public/index.html` 由 Vercel CDN 直接托管，`/api/*` 进函数。
+- **持久化限制**：`/tmp` 按实例隔离、冷启动会重置，多实例之间不共享。部署后可以正常浏览/答题，但答题历史、导入/删除套题只在该实例存活期间有效，不能作为真实数据存储。
+- 需要真正持久化时，选择带持久磁盘的 Node 主机，或迁移到 Turso/Postgres 等托管数据库，再替换 `db.js` 的数据访问层。
+
 ## 数据模型与关键约束
 
 | 表 | 说明 |

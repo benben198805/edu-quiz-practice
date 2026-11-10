@@ -4,6 +4,7 @@ const { openDB } = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_SERVERLESS = Boolean(process.env.VERCEL);
 
 app.use(express.json({ limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -339,6 +340,11 @@ app.get("/api/attempts/:id", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`服务已启动：http://localhost:${PORT}`);
-});
+module.exports = app;
+
+// 本地运行（node server.js）时监听端口；Vercel 作为函数加载时只导出 app
+if (require.main === module && !IS_SERVERLESS) {
+  app.listen(PORT, () => {
+    console.log(`服务已启动：http://localhost:${PORT}`);
+  });
+}

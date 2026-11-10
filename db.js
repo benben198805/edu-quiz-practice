@@ -1,9 +1,25 @@
+const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
 
-const DB_PATH = process.env.QUIZ_DB_PATH || path.join(__dirname, "quiz.db");
+/*
+ * Vercel 等 serverless 运行目录只读，只能写 /tmp。
+ * 因此把随仓库打包的 quiz.db 在冷启动时复制到 /tmp 再打开；
+ * 注意：/tmp 是按实例隔离且冷启动会重置，写入不会跨实例共享。
+ * 需要持久化时用 QUIZ_DB_PATH 指向可写磁盘，或改用托管数据库。
+ */
+const IS_SERVERLESS = Boolean(process.env.VERCEL);
+const BUNDLED_DB = path.join(__dirname, "quiz.db");
+const DB_PATH = process.env.QUIZ_DB_PATH
+  || (IS_SERVERLESS ? path.join("/tmp", "quiz.db") : BUNDLED_DB);
 
 function openDB() {
+  if (IS_SERVERLESS && !process.env.QUIZ_DB_PATH && !fs.existsSync(DB_PATH)) {
+    if (!fs.existsSync(BUNDLED_DB)) {
+      throw new Error(`数据库文件缺失：${BUNDLED_DB}（需随部署包一起上传）`);
+    }
+    fs.copyFileSync(BUNDLED_DB, DB_PATH);
+  }
   const db = new Database(DB_PATH);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
