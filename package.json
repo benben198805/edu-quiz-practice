@@ -3,12 +3,19 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "init": "node db.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "npm run db:migrate && node server.js",
+    "db:migrate": "node scripts/migrate.js",
+    "db:status": "node scripts/migrate.js --status"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
-    "express": "^4.21.2"
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "mysql2": "^3.24.6",
+    "sequelize": "^6.37.8"
   }
 }

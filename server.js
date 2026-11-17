@@ -1,54 +1,94 @@
 const path = require("path");
 const express = require("express");
-const { openDB } = require("./db");
+const { Op, fn, col, literal } = require("sequelize");
+const { sequelize, Paper, Question, Attempt, Answer } = require("./db");
+const { nowLocal } = require("./db/time");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const IS_SERVERLESS = Boolean(process.env.VERCEL);
 
 app.use(express.json({ limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const db = openDB();
+function asyncHandler(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function parseJson(value, fallback) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+/* MySQL DOUBLE 求和会出现 83.99999999999994，保留 2 位小数规避浮点误差。 */
+function roundScore(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+/* ---------- 健康检查（云托管探针可用） ---------- */
+app.get("/api/health", asyncHandler(async (req, res) => {
+  await sequelize.authenticate();
+  res.json({ ok: true });
+}));
 
 /* ---------- 套题列表（含答题历史数） ---------- */
-app.get("/api/papers", (req, res) => {
-  const rows = db.prepare(`
-    SELECT p.id, p.name, p.description, p.created_at,
-           (SELECT COUNT(*) FROM questions q WHERE q.paper_id = p.id) AS question_count,
-           (SELECT COALESCE(SUM(q.score),0) FROM questions q WHERE q.paper_id = p.id) AS max_score,
-           (SELECT COUNT(*) FROM attempts a WHERE a.paper_id = p.id OR a.paper_name = p.name) AS attempt_count,
-           (SELECT MAX(a.started_at) FROM attempts a WHERE a.paper_id = p.id OR a.paper_name = p.name) AS last_attempt_at
-    FROM papers p
-    -- 提取名称中的数字并转为整数排序，例如 "进阶版第2套" 提取出 2
-    ORDER BY CAST(SUBSTR(p.name, INSTR(p.name, '第') + 1, LENGTH(p.name) - INSTR(p.name, '第') - 1) AS INTEGER) ASC
-  `).all();
-  res.json(rows);
-});
+app.get("/api/papers", asyncHandler(async (req, res) => {
+  const rows = await Paper.findAll({
+    attributes: [
+      "id",
+      "name",
+      "description",
+      "created_at",
+      [literal("(SELECT COUNT(*) FROM questions q WHERE q.paper_id = Paper.id)"), "question_count"],
+      [literal("(SELECT COALESCE(SUM(q.score), 0) FROM questions q WHERE q.paper_id = Paper.id)"), "max_score"],
+      [literal("(SELECT COUNT(*) FROM attempts a WHERE a.paper_id = Paper.id OR a.paper_name = Paper.name)"), "attempt_count"],
+      [literal("(SELECT MAX(a.started_at) FROM attempts a WHERE a.paper_id = Paper.id OR a.paper_name = Paper.name)"), "last_attempt_at"],
+    ],
+    // 从名称里提取“第 N 套”的 N 排序，与旧 SQLite 实现保持一致
+    order: [
+      literal("CAST(SUBSTRING(Paper.name, LOCATE('第', Paper.name) + 1) AS UNSIGNED) ASC"),
+      ["id", "ASC"],
+    ],
+    raw: true,
+  });
+
+  res.json(rows.map(row => ({
+    ...row,
+    question_count: Number(row.question_count) || 0,
+    max_score: roundScore(row.max_score),
+    attempt_count: Number(row.attempt_count) || 0,
+  })));
+}));
 
 /* ---------- 某套题的题目（只读详情，管理页也用它） ---------- */
-app.get("/api/papers/:id/questions", (req, res) => {
+app.get("/api/papers/:id/questions", asyncHandler(async (req, res) => {
   const paperId = Number(req.params.id);
-  const paper = db.prepare("SELECT * FROM papers WHERE id = ?").get(paperId);
+  if (!paperId) return res.status(400).json({ error: "缺少套题 id" });
+
+  const paper = await Paper.findByPk(paperId, { raw: true });
   if (!paper) return res.status(404).json({ error: "套题不存在" });
 
-  const rows = db.prepare(`
-    SELECT id, seq, type, score, stem, options, answer, analysis
-    FROM questions WHERE paper_id = ? ORDER BY seq
-  `).all(paperId);
+  const rows = await Question.findAll({
+    attributes: ["id", "seq", "type", "score", "stem", "options", "answer", "analysis"],
+    where: { paper_id: paperId },
+    order: [["seq", "ASC"]],
+    raw: true,
+  });
 
   res.json({
     paper,
-    questions: rows.map(r => ({
-      ...r,
-      options: JSON.parse(r.options),
-      answer: JSON.parse(r.answer),
-    }))
+    questions: rows.map(row => ({
+      ...row,
+      options: parseJson(row.options, []),
+      answer: parseJson(row.answer, []),
+    })),
   });
-});
+}));
 
 /* ---------- 导入套题（同名覆盖题目，不影响已有历史快照） ---------- */
-app.post("/api/papers/import", (req, res) => {
+app.post("/api/papers/import", asyncHandler(async (req, res) => {
   const body = req.body || {};
   const name = String(body.name || "").trim();
   const description = String(body.description || "").trim();
@@ -64,51 +104,56 @@ app.post("/api/papers/import", (req, res) => {
     });
   }
 
-  const existing = db.prepare("SELECT id FROM papers WHERE name = ?").get(name);
-  const created = !existing;
-
-  let paperId;
   try {
-    paperId = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO papers (name, description) VALUES (?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-          description = CASE WHEN excluded.description = '' THEN papers.description
-                             ELSE excluded.description END
-      `).run(name, description);
+    const result = await sequelize.transaction(async transaction => {
+      let paper = await Paper.findOne({ where: { name }, transaction });
+      const created = !paper;
 
-      const id = db.prepare("SELECT id FROM papers WHERE name = ?").get(name).id;
+      if (paper) {
+        if (description) await paper.update({ description }, { transaction });
+      } else {
+        paper = await Paper.create(
+          { name, description, created_at: nowLocal() },
+          { transaction }
+        );
+      }
 
-      const upsert = db.prepare(`
-        INSERT INTO questions (paper_id, seq, type, score, stem, options, answer, analysis)
-        VALUES (@paper_id, @seq, @type, @score, @stem, @options, @answer, @analysis)
-        ON CONFLICT(paper_id, seq) DO UPDATE SET
-          type=excluded.type, score=excluded.score, stem=excluded.stem,
-          options=excluded.options, answer=excluded.answer, analysis=excluded.analysis
-      `);
-      questions.forEach((q, idx) => {
-        upsert.run({
-          paper_id: id,
-          seq: idx + 1,
-          type: q.type,
-          score: q.score,
-          stem: q.stem,
-          options: JSON.stringify(q.options),
-          answer: JSON.stringify(q.answer),
-          analysis: q.analysis,
-        });
+      const rows = questions.map((q, index) => ({
+        paper_id: paper.id,
+        seq: index + 1,
+        type: q.type,
+        score: q.score,
+        stem: q.stem,
+        options: JSON.stringify(q.options),
+        answer: JSON.stringify(q.answer),
+        analysis: q.analysis,
+      }));
+
+      await Question.bulkCreate(rows, {
+        updateOnDuplicate: ["type", "score", "stem", "options", "answer", "analysis"],
+        transaction,
       });
 
       // 新文件题数变少时删掉尾部多余题目；历史已存快照，不受影响
-      db.prepare("DELETE FROM questions WHERE paper_id = ? AND seq > ?").run(id, questions.length);
-      return id;
-    })();
+      await Question.destroy({
+        where: { paper_id: paper.id, seq: { [Op.gt]: questions.length } },
+        transaction,
+      });
+
+      return { paperId: paper.id, created };
+    });
+
+    res.json({
+      ok: true,
+      paperId: result.paperId,
+      name,
+      created: result.created,
+      questionCount: questions.length,
+    });
   } catch (err) {
     return res.status(500).json({ error: "导入失败：" + err.message });
   }
-
-  res.json({ ok: true, paperId, name, created, questionCount: questions.length });
-});
+}));
 
 function normalizeQuestions(input) {
   const errors = [];
@@ -191,160 +236,219 @@ function normalizeQuestions(input) {
 }
 
 /* ---------- 删除套题（题目删除，历史快照保留） ---------- */
-app.delete("/api/papers/:id", (req, res) => {
+app.delete("/api/papers/:id", asyncHandler(async (req, res) => {
   const paperId = Number(req.params.id);
   if (!paperId) return res.status(400).json({ error: "缺少套题 id" });
 
-  const paper = db.prepare("SELECT id, name FROM papers WHERE id = ?").get(paperId);
+  const paper = await Paper.findByPk(paperId, { raw: true });
   if (!paper) return res.status(404).json({ error: "套题不存在" });
 
-  const attemptCount = db.prepare(
-    "SELECT COUNT(*) AS c FROM attempts WHERE paper_id = ? OR paper_name = ?"
-  ).get(paperId, paper.name).c;
+  const attemptCount = await Attempt.count({
+    where: {
+      [Op.or]: [{ paper_id: paperId }, { paper_name: paper.name }],
+    },
+  });
 
   try {
     // questions 随套题级联删除；answers.question_id 置 NULL，快照字段保留
-    db.prepare("DELETE FROM papers WHERE id = ?").run(paperId);
+    await Paper.destroy({ where: { id: paperId } });
   } catch (err) {
     return res.status(500).json({ error: "删除失败：" + err.message });
   }
 
   res.json({ ok: true, deleted: paperId, name: paper.name, keptAttempts: attemptCount });
-});
+}));
 
 /* ---------- 开始一次练习 ---------- */
-app.post("/api/attempts", (req, res) => {
+app.post("/api/attempts", asyncHandler(async (req, res) => {
   const paperId = Number(req.body && req.body.paperId);
   if (!paperId) return res.status(400).json({ error: "缺少 paperId" });
 
-  const paper = db.prepare("SELECT id, name FROM papers WHERE id = ?").get(paperId);
+  const paper = await Paper.findByPk(paperId, { raw: true });
   if (!paper) return res.status(404).json({ error: "套题不存在" });
 
-  const maxScore = db.prepare(
-    "SELECT COALESCE(SUM(score),0) AS s FROM questions WHERE paper_id = ?"
-  ).get(paperId).s;
+  const maxScore = roundScore(await Question.sum("score", { where: { paper_id: paperId } }));
 
-  const info = db.prepare(
-    `INSERT INTO attempts (paper_id, paper_name, max_score) VALUES (?, ?, ?)`
-  ).run(paperId, paper.name, maxScore);
+  const attempt = await Attempt.create({
+    paper_id: paperId,
+    paper_name: paper.name,
+    started_at: nowLocal(),
+    max_score: maxScore,
+  });
 
-  res.json({ attemptId: info.lastInsertRowid, maxScore });
-});
+  res.json({ attemptId: attempt.id, maxScore });
+}));
 
 /* ---------- 提交单题作答（同时写入题目快照） ---------- */
-app.post("/api/attempts/:id/answers", (req, res) => {
+app.post("/api/attempts/:id/answers", asyncHandler(async (req, res) => {
   const attemptId = Number(req.params.id);
-  const { questionId, chosen } = req.body || {};
+  const questionId = Number(req.body && req.body.questionId);
+  const chosen = Array.isArray(req.body && req.body.chosen)
+    ? req.body.chosen.map(String)
+    : [];
   if (!attemptId || !questionId) {
     return res.status(400).json({ error: "缺少 attemptId 或 questionId" });
   }
 
-  const q = db.prepare("SELECT * FROM questions WHERE id = ?").get(questionId);
-  if (!q) return res.status(404).json({ error: "题目不存在" });
+  const question = await Question.findByPk(questionId, { raw: true });
+  if (!question) return res.status(404).json({ error: "题目不存在" });
 
-  const right = JSON.parse(q.answer).sort().join("");
-  const user = (chosen || []).slice().sort().join("");
+  const right = parseJson(question.answer, []).slice().sort().join("");
+  const user = chosen.slice().sort().join("");
   const isCorrect = right === user && user !== "";
-  const earned = isCorrect ? q.score : 0;
+  const earned = isCorrect ? Number(question.score) : 0;
 
-  db.prepare(`
-    INSERT INTO answers
-      (attempt_id, question_id, seq, type, score, stem, options, answer, analysis,
-       chosen, is_correct, earned)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(attempt_id, question_id) DO UPDATE SET
-      chosen=excluded.chosen, is_correct=excluded.is_correct,
-      earned=excluded.earned, answered_at=datetime('now','localtime')
-  `).run(
-    attemptId, questionId,
-    q.seq, q.type, q.score, q.stem, q.options, q.answer, q.analysis,
-    JSON.stringify(chosen || []), isCorrect ? 1 : 0, earned
-  );
+  await sequelize.transaction(async transaction => {
+    const payload = {
+      attempt_id: attemptId,
+      question_id: questionId,
+      seq: question.seq,
+      type: question.type,
+      score: question.score,
+      stem: question.stem,
+      options: question.options,
+      answer: question.answer,
+      analysis: question.analysis,
+      chosen: JSON.stringify(chosen),
+      is_correct: isCorrect ? 1 : 0,
+      earned,
+      answered_at: nowLocal(),
+    };
 
-  refreshAttempt(attemptId);
+    const existing = await Answer.findOne({
+      where: { attempt_id: attemptId, seq: question.seq },
+      transaction,
+    });
+
+    if (existing) {
+      await existing.update(payload, { transaction });
+    } else {
+      await Answer.create(payload, { transaction });
+    }
+
+    await refreshAttempt(attemptId, transaction);
+  });
+
   res.json({ isCorrect, earned });
-});
+}));
 
 /* ---------- 结束一次练习 ---------- */
-app.post("/api/attempts/:id/finish", (req, res) => {
-  const attemptId = Number(req.params.id);
-  refreshAttempt(attemptId);
-  db.prepare(`UPDATE attempts SET finished_at = datetime('now','localtime') WHERE id = ?`)
-    .run(attemptId);
-  const row = db.prepare("SELECT * FROM attempts WHERE id = ?").get(attemptId);
-  res.json(row);
-});
-
-function refreshAttempt(attemptId) {
-  const s = db.prepare(`
-    SELECT COALESCE(SUM(earned),0) AS total_score,
-           COUNT(*) AS answered,
-           COALESCE(SUM(is_correct),0) AS correct
-    FROM answers WHERE attempt_id = ?
-  `).get(attemptId);
-
-  db.prepare(`
-    UPDATE attempts SET total_score = ?, answered = ?, correct = ? WHERE id = ?
-  `).run(s.total_score, s.answered, s.correct, attemptId);
-}
-
-/* ---------- 历史记录列表（全部返回，前端按套题筛选） ---------- */
-app.get("/api/attempts", (req, res) => {
-  const rows = db.prepare(`
-    SELECT a.*, CASE WHEN p.id IS NULL THEN 0 ELSE 1 END AS paper_exists
-    FROM attempts a
-    LEFT JOIN papers p ON p.name = a.paper_name
-    ORDER BY a.id DESC
-  `).all();
-  res.json(rows);
-});
-
-/* ---------- 删除一条历史记录 ---------- */
-app.delete("/api/attempts/:id", (req, res) => {
+app.post("/api/attempts/:id/finish", asyncHandler(async (req, res) => {
   const attemptId = Number(req.params.id);
   if (!attemptId) return res.status(400).json({ error: "缺少记录 id" });
 
-  // answers 表有 ON DELETE CASCADE，这里显式清理一次，避免旧库未开启外键时留下孤儿数据
-  const remove = db.transaction((id) => {
-    db.prepare("DELETE FROM answers WHERE attempt_id = ?").run(id);
-    return db.prepare("DELETE FROM attempts WHERE id = ?").run(id);
+  await sequelize.transaction(async transaction => {
+    await refreshAttempt(attemptId, transaction);
+    await Attempt.update(
+      { finished_at: nowLocal() },
+      { where: { id: attemptId }, transaction }
+    );
   });
-  const info = remove(attemptId);
-  if (!info.changes) return res.status(404).json({ error: "记录不存在" });
+
+  const row = await Attempt.findByPk(attemptId, { raw: true });
+  if (!row) return res.status(404).json({ error: "记录不存在" });
+  res.json(row);
+}));
+
+async function refreshAttempt(attemptId, transaction) {
+  const stats = await Answer.findOne({
+    attributes: [
+      [fn("COALESCE", fn("SUM", col("earned")), 0), "total_score"],
+      [fn("COUNT", col("id")), "answered"],
+      [fn("COALESCE", fn("SUM", col("is_correct")), 0), "correct"],
+    ],
+    where: { attempt_id: attemptId },
+    raw: true,
+    transaction,
+  });
+
+  await Attempt.update(
+    {
+      total_score: roundScore(stats.total_score),
+      answered: Number(stats.answered) || 0,
+      correct: Number(stats.correct) || 0,
+    },
+    { where: { id: attemptId }, transaction }
+  );
+}
+
+/* ---------- 历史记录列表（全部返回，前端按套题筛选） ---------- */
+app.get("/api/attempts", asyncHandler(async (req, res) => {
+  const [rows, papers] = await Promise.all([
+    Attempt.findAll({ order: [["id", "DESC"]], raw: true }),
+    Paper.findAll({ attributes: ["name"], raw: true }),
+  ]);
+  const existingNames = new Set(papers.map(paper => paper.name));
+
+  res.json(rows.map(row => ({
+    ...row,
+    paper_exists: existingNames.has(row.paper_name) ? 1 : 0,
+  })));
+}));
+
+/* ---------- 删除一条历史记录 ---------- */
+app.delete("/api/attempts/:id", asyncHandler(async (req, res) => {
+  const attemptId = Number(req.params.id);
+  if (!attemptId) return res.status(400).json({ error: "缺少记录 id" });
+
+  const removed = await sequelize.transaction(async transaction => {
+    await Answer.destroy({ where: { attempt_id: attemptId }, transaction });
+    return Attempt.destroy({ where: { id: attemptId }, transaction });
+  });
+
+  if (!removed) return res.status(404).json({ error: "记录不存在" });
   res.json({ ok: true, deleted: attemptId });
-});
+}));
 
 /* ---------- 历史记录详情（纯读快照，套题删了也完整） ---------- */
-app.get("/api/attempts/:id", (req, res) => {
-  const attempt = db.prepare(`
-    SELECT a.*, CASE WHEN p.id IS NULL THEN 0 ELSE 1 END AS paper_exists
-    FROM attempts a LEFT JOIN papers p ON p.name = a.paper_name
-    WHERE a.id = ?
-  `).get(req.params.id);
+app.get("/api/attempts/:id", asyncHandler(async (req, res) => {
+  const attempt = await Attempt.findByPk(req.params.id, { raw: true });
   if (!attempt) return res.status(404).json({ error: "记录不存在" });
 
-  const detail = db.prepare(`
-    SELECT seq, type, score, stem, options, answer, analysis,
-           chosen, is_correct, earned, answered_at
-    FROM answers WHERE attempt_id = ? ORDER BY seq
-  `).all(req.params.id);
+  const [paper, detail] = await Promise.all([
+    attempt.paper_name
+      ? Paper.findOne({ where: { name: attempt.paper_name }, attributes: ["id"], raw: true })
+      : null,
+    Answer.findAll({
+      attributes: [
+        "seq", "type", "score", "stem", "options", "answer", "analysis",
+        "chosen", "is_correct", "earned", "answered_at",
+      ],
+      where: { attempt_id: attempt.id },
+      order: [["seq", "ASC"]],
+      raw: true,
+    }),
+  ]);
 
   res.json({
-    attempt,
-    detail: detail.map(r => ({
-      ...r,
-      options: JSON.parse(r.options),
-      answer: JSON.parse(r.answer),
-      chosen: r.chosen ? JSON.parse(r.chosen) : []
-    }))
+    attempt: { ...attempt, paper_exists: paper ? 1 : 0 },
+    detail: detail.map(row => ({
+      ...row,
+      options: parseJson(row.options, []),
+      answer: parseJson(row.answer, []),
+      chosen: row.chosen ? parseJson(row.chosen, []) : [],
+    })),
   });
+}));
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: "服务器内部错误" });
 });
 
 module.exports = app;
 
-// 本地运行（node server.js）时监听端口；Vercel 作为函数加载时只导出 app
-if (require.main === module && !IS_SERVERLESS) {
-  app.listen(PORT, () => {
-    console.log(`服务已启动：http://localhost:${PORT}`);
-  });
+// 本地运行（node server.js）时监听端口
+if (require.main === module) {
+  sequelize.authenticate()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`服务已启动：http://localhost:${PORT}`);
+      });
+    })
+    .catch(err => {
+      console.error("数据库连接失败：" + err.message);
+      process.exit(1);
+    });
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# 重启 v2 服务：端口被占用则先关闭旧进程，再启动新进程。
-# 用法：./restart.sh            （默认端口 3000）
-#       PORT=3100 ./restart.sh  （指定端口）
+# 重启服务：先执行数据库迁移，再启动 Node。
+# 用法：./restart.sh                 （默认端口 3000）
+#       PORT=3100 ./restart.sh       （指定端口）
+#       SKIP_MIGRATE=1 ./restart.sh  （跳过迁移）
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -10,7 +11,8 @@ PORT="${PORT:-3000}"
 HOST="127.0.0.1"
 PID_FILE=".server.pid"
 LOG_FILE="server.log"
-START_TIMEOUT="${START_TIMEOUT:-20}"
+START_TIMEOUT="${START_TIMEOUT:-30}"
+HEALTH_URL="http://$HOST:$PORT/api/health"
 
 pids_on_port() {
   lsof -nP -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true
@@ -18,6 +20,15 @@ pids_on_port() {
 
 port_in_use() {
   [ -n "$(pids_on_port)" ]
+}
+
+run_migrations() {
+  if [ "${SKIP_MIGRATE:-0}" = "1" ]; then
+    echo "已跳过数据库迁移（SKIP_MIGRATE=1）。"
+    return
+  fi
+  echo "执行数据库迁移..."
+  npm run db:migrate
 }
 
 stop_old() {
@@ -71,7 +82,7 @@ start_new() {
       rm -f "$PID_FILE"
       exit 1
     fi
-    if curl -fsS --max-time 1 "http://$HOST:$PORT/api/papers" >/dev/null 2>&1; then
+    if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
       echo "重启完成：http://$HOST:$PORT"
       return
     fi
@@ -83,5 +94,6 @@ start_new() {
   exit 1
 }
 
+run_migrations
 stop_old
 start_new
