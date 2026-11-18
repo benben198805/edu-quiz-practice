@@ -1386,7 +1386,8 @@ function renderResult(data, from){
 
   $("finalScore").textContent = formatScore(att.total_score);
   $("finalMax").textContent = formatScore(att.max_score);
-  $("finalSub").textContent = `${att.paper_name || ""} ｜ 已完成 ${att.answered} 题 ｜ 答对 ${att.correct} 题`;
+  const rate = att.answered ? Math.round(att.correct / att.answered * 100) : 0;
+  $("finalSub").textContent = `${att.paper_name || ""} ｜ 已完成 ${att.answered} 题 ｜ 答对 ${att.correct} 题 ｜ 正确率 ${rate}%`;
 
   const groups = {};
   detail.forEach(d=>{
@@ -1408,15 +1409,6 @@ function renderResult(data, from){
     `;
     grid.appendChild(cell);
   });
-  const overall = document.createElement("div");
-  overall.className = "score-cell";
-  overall.style.background = "#eef3ff";
-  overall.innerHTML = `
-    <div class="k">总得分</div>
-    <div class="v good">${formatScore(att.total_score)} <span style="font-size:12px;color:#9ca3af;">/ ${formatScore(att.max_score)} 分</span></div>
-    <div style="font-size:12px;color:#6b7280;">正确率 ${att.answered?Math.round(att.correct/att.answered*100):0}%</div>
-  `;
-  grid.appendChild(overall);
 
   $("backFromResult").onclick = ()=>{
     if(from === "quiz"){ setTab("papers"); }
@@ -1432,9 +1424,15 @@ function renderResult(data, from){
     if(ok){ resultData = null; setTab("history"); }
   };
 
-  currentFilter = "all";
-  document.querySelectorAll(".filter-btn").forEach(b=>b.classList.remove("active","green","red"));
-  document.querySelector('.filter-btn[data-filter="all"]').classList.add("active");
+  // 作答结束默认只看错题；从历史打开时看全部
+  currentFilter = (from === "quiz") ? "wrong" : "all";
+  document.querySelectorAll("#viewResult .filter-btn").forEach(b=>b.classList.remove("active","green","red"));
+  const activeFilter = document.querySelector(`#viewResult .filter-btn[data-filter="${currentFilter}"]`);
+  if(activeFilter){
+    activeFilter.classList.add("active");
+    if(currentFilter === "correct") activeFilter.classList.add("green");
+    if(currentFilter === "wrong") activeFilter.classList.add("red");
+  }
   renderResultList(detail);
 }
 
@@ -1452,7 +1450,11 @@ function renderResultList(detail){
   $("reviewTitle").textContent = `📋 逐题回顾（${titleMap[currentFilter]}，共 ${indexes.length} 题）`;
   list.innerHTML = "";
   if(!indexes.length){
-    list.innerHTML = `<div class="empty-hint">当前筛选下没有题目。</div>`;
+    list.innerHTML = `<div class="empty-hint">${
+      currentFilter === "wrong" ? "本次练习没有错题，全部答对。"
+      : currentFilter === "correct" ? "本次练习没有答对的题目。"
+      : "当前筛选下没有题目。"
+    }</div>`;
     return;
   }
   indexes.forEach(idx=>{
