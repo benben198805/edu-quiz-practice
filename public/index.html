@@ -186,6 +186,22 @@
   .badge.judge{background:#eef3ff;color:#3b6ef5;}
   .badge.single{background:#e8f8ef;color:#0d8a45;}
   .badge.multi{background:#fff4e5;color:#b45309;}
+  .badge.case{background:#f3ecff;color:#6b3fa0;}
+  .q-material{
+    border:1px solid #dbe4f7;background:#f7f9ff;border-radius:11px;
+    padding:12px 15px;margin-bottom:14px;font-size:13.8px;color:#374151;white-space:pre-wrap;
+  }
+  .q-material .qm-label{font-weight:800;color:var(--primary);margin-bottom:5px;}
+  .d-material{
+    border:1px solid #dbe4f7;background:#f7f9ff;border-radius:9px;
+    padding:10px 12px;margin-bottom:10px;font-size:12.9px;color:#374151;white-space:pre-wrap;
+  }
+  .d-material .lbl{font-weight:700;color:var(--primary);}
+  .ri-material{
+    border-left:3px solid #c6d4f7;background:#f7f9ff;border-radius:6px;
+    padding:8px 11px;margin-bottom:8px;font-size:12.9px;color:#374151;white-space:pre-wrap;
+  }
+  .ri-material .lbl{font-weight:700;color:var(--primary);}
   .q-stem{font-size:15.5px;margin:0 0 16px;white-space:pre-wrap;}
   .options{display:flex;flex-direction:column;gap:9px;}
   .opt{
@@ -411,6 +427,10 @@
           <span class="badge" id="qBadge"></span>
           <span class="q-type" id="qScoreTip"></span>
         </div>
+        <div class="q-material" id="qMaterial" style="display:none;">
+          <div class="qm-label">【案例材料】</div>
+          <div id="qMaterialText"></div>
+        </div>
         <div class="q-stem" id="qStem"></div>
         <div class="options" id="options"></div>
 
@@ -509,8 +529,8 @@
 
 <script>
 /* ================= 全局状态 ================= */
-const typeLabel = {judge:"判断题", single:"单选题", multi:"多项选择题"};
-const typeBadgeClass = {judge:"judge", single:"single", multi:"multi"};
+const typeLabel = {judge:"判断题", single:"单选题", multi:"多项选择题", case:"案例分析题"};
+const typeBadgeClass = {judge:"judge", single:"single", multi:"multi", case:"case"};
 const letters = ["A","B","C","D","E"];
 const $ = id => document.getElementById(id);
 
@@ -748,6 +768,7 @@ function renderDetailFilters(){
     {k:"judge", label:"判断题"},
     {k:"single", label:"单选题"},
     {k:"multi", label:"多项选择题"},
+    {k:"case", label:"案例分析题"},
   ];
   defs.forEach(d=>{
     const n = d.k === "all" ? detailQuestions.length : detailQuestions.filter(q=>q.type===d.k).length;
@@ -795,7 +816,18 @@ function renderDetailQuestions(){
     const stem = document.createElement("div");
     stem.className = "d-stem";
     stem.textContent = q.stem;
-    item.append(head, stem);
+    item.appendChild(head);
+    if(q.material){
+      const material = document.createElement("div");
+      material.className = "d-material";
+      const mlbl = document.createElement("span");
+      mlbl.className = "lbl";
+      mlbl.textContent = "【案例材料】";
+      material.appendChild(mlbl);
+      material.appendChild(document.createTextNode(q.material));
+      item.appendChild(material);
+    }
+    item.appendChild(stem);
 
     q.options.forEach(([key, text])=>{
       const isAns = q.answer.includes(key);
@@ -1028,6 +1060,9 @@ function renderQuestion(){
   $("qBadge").className = "badge " + (typeBadgeClass[q.type] || "");
   $("qScoreTip").textContent = formatScore(q.score) + " 分";
   $("qStem").textContent = q.stem;
+  const mat = $("qMaterial");
+  mat.style.display = q.material ? "block" : "none";
+  $("qMaterialText").textContent = q.material || "";
   $("progressText").textContent = `第 ${i+1} / ${QUESTIONS.length} 题`;
   $("progressBar").style.width = ((i)/QUESTIONS.length*100) + "%";
 
@@ -1067,7 +1102,7 @@ function renderQuestion(){
 function toggleOption(key){
   const i = state.index, q = QUESTIONS[i];
   let cur = state.answers[i] ? [...state.answers[i]] : [];
-  if(q.type === "multi"){
+  if(q.type === "multi" || q.type === "case"){
     cur = cur.includes(key) ? cur.filter(k=>k!==key) : [...cur, key];
   } else {
     cur = cur.includes(key) ? [] : [key];
@@ -1143,7 +1178,7 @@ async function showSummary(){
   }
 
   const detail = QUESTIONS.map((q,i)=>({
-    seq: q.seq, type:q.type, score:q.score, stem:q.stem, options:q.options,
+    seq: q.seq, type:q.type, score:q.score, material:q.material || "", stem:q.stem, options:q.options,
     answer:q.answer, analysis:q.analysis,
     chosen: state.answers[i] || [],
     is_correct: state.submitted[i] && isCorrect(i) ? 1 : 0,
@@ -1383,6 +1418,7 @@ function renderResultList(detail){
     item.innerHTML = `
       <div class="ri-idx ${ok?'ok':'no'}">${idx+1}</div>
       <div class="ri-body">
+        ${d.material ? `<div class="ri-material"><span class="lbl">【案例材料】</span>${esc(d.material)}</div>` : ""}
         <div class="ri-stem">${d.stem}</div>
         <div class="ri-detail">
           类型：${typeLabel[d.type]||d.type} ｜
@@ -1429,6 +1465,9 @@ function buildPrintHTML(){
     const userAns = (d.chosen||[]).sort().join("") || "（未答）";
     html += `<div style="border:1px solid #d0d5dd;border-radius:6px;padding:10px 12px;margin-bottom:10px;page-break-inside:avoid;">`;
     html += `<div style="font-size:13px;font-weight:700;color:${ok?'#12a150':'#e5484d'};margin-bottom:5px;">第 ${idx+1} 题【${typeLabel[d.type]||d.type} · ${formatScore(d.score)} 分】 ${ok?"✔ 正确":"✘ 错误"}</div>`;
+    if(d.material){
+      html += `<div style="font-size:11.8px;color:#374151;background:#f7f9ff;border:1px solid #dbe4f7;border-radius:5px;padding:7px 9px;margin-bottom:6px;white-space:pre-wrap;"><b style="color:#3b6ef5;">【案例材料】</b>${esc(d.material)}</div>`;
+    }
     html += `<div style="font-size:12.5px;color:#111;white-space:pre-wrap;margin-bottom:5px;">${d.stem}</div>`;
     d.options.forEach(([key,text])=>{
       const isAns = d.answer.includes(key);

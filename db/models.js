@@ -26,6 +26,8 @@ const Question = sequelize.define("Question", {
   seq: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
   type: { type: DataTypes.STRING(16), allowNull: false },
   score: { type: DataTypes.DOUBLE, allowNull: false },
+  /* 案例分析题共用材料；其他题型为 NULL */
+  material: { type: DataTypes.TEXT, allowNull: true },
   stem: { type: DataTypes.TEXT, allowNull: false },
   options: { type: DataTypes.TEXT, allowNull: false },
   answer: { type: DataTypes.TEXT, allowNull: false },
@@ -57,6 +59,8 @@ const Answer = sequelize.define("Answer", {
   seq: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
   type: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "" },
   score: { type: DataTypes.DOUBLE, allowNull: false, defaultValue: 0 },
+  /* 案例材料快照，历史详情不依赖 questions */
+  material: { type: DataTypes.TEXT, allowNull: true },
   stem: { type: DataTypes.TEXT, allowNull: false },
   options: { type: DataTypes.TEXT, allowNull: false },
   answer: { type: DataTypes.TEXT, allowNull: false },

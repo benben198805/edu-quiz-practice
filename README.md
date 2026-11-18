@@ -29,9 +29,10 @@ npm run db:migrate             # 建库、建表、导入旧 SQLite 数据
 - `migrations/V1__init.sql`：MySQL 5.7 表结构。
 - `migrations/V2__seed_papers.sql`：20 套题、1800 题。
 - `migrations/V3__seed_attempts.sql`：4 次历史、360 条作答快照。
+- `migrations/V4__add_case_material.sql`：`questions` / `answers` 增加案例分析题材料列。
 - 执行记录写入 `schema_migrations`，已执行脚本带 SHA-256 校验和。
 
-新增结构变更时新建 `migrations/V4__xxx.sql`，不要修改已执行的脚本。
+新增结构变更时新建 `migrations/V5__xxx.sql`，不要修改已执行的脚本。
 
 ## 微信云托管
 

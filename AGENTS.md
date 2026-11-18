@@ -30,7 +30,8 @@
 ├── migrations/
 │   ├── V1__init.sql          MySQL 5.7 初始表结构
 │   ├── V2__seed_papers.sql   旧库导出：20 套题、1800 题
-│   └── V3__seed_attempts.sql 旧库导出：4 次历史、360 条作答快照
+│   ├── V3__seed_attempts.sql 旧库导出：4 次历史、360 条作答快照
+│   └── V4__add_case_material.sql 案例分析题：questions/answers 增加 material 列
 ├── scripts/migrate.js        迁移执行器（migrate / --status）
 ├── public/index.html         唯一前端文件：样式、页面、全部交互
 ├── papers_data/              题目源 JSON（paper-01.json … paper-20.json）
@@ -110,7 +111,7 @@ SKIP_MIGRATE=1 ./restart.sh
 |`papers`|套题，`name` 唯一|
 |`questions`|套题题目，`UNIQUE(paper_id, seq)`，随套题级联删除|
 |`attempts`|一次练习，带 `paper_id` 与 `paper_name` 快照|
-|`answers`|一次作答，**同时保存完整题目快照**（seq/type/score/stem/options/answer/analysis）|
+|`answers`|一次作答，**同时保存完整题目快照**（seq/type/score/material/stem/options/answer/analysis）|
 |`schema_migrations`|已执行的迁移版本、描述、SHA-256 校验和、执行时间|
 
 必须保持的规则：
@@ -127,7 +128,7 @@ SKIP_MIGRATE=1 ./restart.sh
 ## 核心功能
 
 - **套题列表**：响应式卡片网格铺满内容区、不分页，卡片显示题数与满分。
-- **答题**：逐题作答，支持判断题/单选题/多项选择题；键盘 `A~E` 选择、`Enter` 提交/下一题；侧边题号总览用颜色标识对错。
+- **答题**：逐题作答，支持判断题/单选题/多项选择题/案例分析题；案例分析题先显示 `material` 案例材料再显示题干，作答为多选。键盘 `A~E` 选择、`Enter` 提交/下一题；侧边题号总览用颜色标识对错。
 - **结果页**：总分、按题型统计、逐题回顾，可按全部/正确/错误筛选，导出 PDF（浏览器打印）。
 - **答题历史**：按套题下拉筛选（客户端筛选，选项带次数，已删套题标注），可查看任意历史详情、删除单条记录；首次提交作答才创建记录，未答则不留痕。
 - **套题管理**：卡片显示题数/满分/答题次数（点击次数跳转该套题历史）；「＋ 导入套题」弹窗导入 JSON；「查看题目」为只读详情（可按题型筛选，正确答案高亮）；「删除套题」二次确认并提示历史保留。
@@ -150,14 +151,16 @@ SKIP_MIGRATE=1 ./restart.sh
 
 ## 题目源与导入格式
 
-- 源文件：`papers_data/paper-NN.json`，一套一文件（当前 01–20，每套 90 题），命名对应「进阶版第 N 套」，描述为 `教育公共基础笔试 · 进阶版第 N 套`。
+- 源文件：`papers_data/paper-NN.json`（进阶版 01–20，每套 90 题）与 `papers_data/paper-high-NN.json`（高阶版 01–05，每套 98 题）；命名对应「第 N 套」或「高阶版第 N 套」。
+- 高阶版末尾 8 题为案例分析题：`type: "case"`，每题自带 `material` 案例材料（同一材料可被多题复用），作答为多选。
 - 结构：题目数组；也接受 `{ name, description, questions }` 对象。
 - 单题字段：
 
 ```json
 {
-  "type": "judge | single | multi",
+  "type": "judge | single | multi | case",
   "score": 0.6,
+  "material": "案例分析题必填：案例材料；其他题型可省略",
   "stem": "题干",
   "options": [["A", "正确"], ["B", "错误"]],
   "answer": ["B"],
@@ -165,7 +168,7 @@ SKIP_MIGRATE=1 ./restart.sh
 }
 ```
 
-- 导入校验（`server.js` 的 `normalizeQuestions()`）：`type` 三选一；`score` 非负数字；`stem` 非空；至少 2 个选项且字母不重复；`answer` 非空、必须是已有选项；判断/单选恰好 1 个正确答案，多选至少 2 个。不通过返回 400 + 逐条错误，事务回滚、不落库。
+- 导入校验（`server.js` 的 `normalizeQuestions()`）：`type` 四选一；`score` 非负数字；`stem` 非空；`case` 必须提供非空 `material`；至少 2 个选项且字母不重复；`answer` 非空、必须是已有选项；判断/单选恰好 1 个正确答案，多选/案例分析至少 2 个。不通过返回 400 + 逐条错误，事务回滚、不落库。
 - 导入后题号按数组顺序重排为 `seq = 1..N`。
 - 所有套题统一通过「套题管理 → 导入套题」入库；`papers_data/` 只是源文件存档，服务不会自动扫描。重名导入会按 seq 覆盖该套题题目，历史快照不受影响。
 

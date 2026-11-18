@@ -71,7 +71,7 @@ app.get("/api/papers/:id/questions", asyncHandler(async (req, res) => {
   if (!paper) return res.status(404).json({ error: "套题不存在" });
 
   const rows = await Question.findAll({
-    attributes: ["id", "seq", "type", "score", "stem", "options", "answer", "analysis"],
+    attributes: ["id", "seq", "type", "score", "material", "stem", "options", "answer", "analysis"],
     where: { paper_id: paperId },
     order: [["seq", "ASC"]],
     raw: true,
@@ -81,6 +81,7 @@ app.get("/api/papers/:id/questions", asyncHandler(async (req, res) => {
     paper,
     questions: rows.map(row => ({
       ...row,
+      material: row.material || "",
       options: parseJson(row.options, []),
       answer: parseJson(row.answer, []),
     })),
@@ -123,6 +124,7 @@ app.post("/api/papers/import", asyncHandler(async (req, res) => {
         seq: index + 1,
         type: q.type,
         score: q.score,
+        material: q.material,
         stem: q.stem,
         options: JSON.stringify(q.options),
         answer: JSON.stringify(q.answer),
@@ -130,7 +132,7 @@ app.post("/api/papers/import", asyncHandler(async (req, res) => {
       }));
 
       await Question.bulkCreate(rows, {
-        updateOnDuplicate: ["type", "score", "stem", "options", "answer", "analysis"],
+        updateOnDuplicate: ["type", "score", "material", "stem", "options", "answer", "analysis"],
         transaction,
       });
 
@@ -164,7 +166,8 @@ function normalizeQuestions(input) {
     return { questions: [], errors: ["题目数组为空"] };
   }
 
-  const validTypes = new Set(["judge", "single", "multi"]);
+  // case：案例分析题，题面依赖可独立阅读的材料（material），作答为多选
+  const validTypes = new Set(["judge", "single", "multi", "case"]);
   const out = [];
 
   input.forEach((raw, i) => {
@@ -172,13 +175,14 @@ function normalizeQuestions(input) {
     const q = raw && typeof raw === "object" ? raw : {};
     const type = String(q.type || "").trim();
     const score = Number(q.score);
+    const material = typeof q.material === "string" ? q.material.trim() : "";
     const stem = typeof q.stem === "string" ? q.stem.trim() : "";
     const analysis = typeof q.analysis === "string" ? q.analysis : "";
     const options = Array.isArray(q.options) ? q.options : [];
     const answer = Array.isArray(q.answer) ? q.answer.map(k => String(k).trim()) : [];
 
     if (!validTypes.has(type)) {
-      errors.push(`第 ${n} 题：type 必须是 judge / single / multi`);
+      errors.push(`第 ${n} 题：type 必须是 judge / single / multi / case`);
       return;
     }
     if (!Number.isFinite(score) || score < 0) {
@@ -187,6 +191,10 @@ function normalizeQuestions(input) {
     }
     if (!stem) {
       errors.push(`第 ${n} 题：题干（stem）不能为空`);
+      return;
+    }
+    if (type === "case" && !material) {
+      errors.push(`第 ${n} 题：案例分析题必须提供 material（案例材料）`);
       return;
     }
     if (options.length < 2) {
@@ -213,18 +221,19 @@ function normalizeQuestions(input) {
       errors.push(`第 ${n} 题：answer 含不存在的选项 ${answer.filter(k => !keys.includes(k)).join("、")}`);
       return;
     }
-    if (type !== "multi" && answer.length !== 1) {
+    if ((type === "judge" || type === "single") && answer.length !== 1) {
       errors.push(`第 ${n} 题：${type === "judge" ? "判断题" : "单选题"} 只能有 1 个正确答案`);
       return;
     }
-    if (type === "multi" && answer.length < 2) {
-      errors.push(`第 ${n} 题：多项选择题至少要有 2 个正确答案`);
+    if ((type === "multi" || type === "case") && answer.length < 2) {
+      errors.push(`第 ${n} 题：${type === "multi" ? "多项选择题" : "案例分析题"}至少要有 2 个正确答案`);
       return;
     }
 
     out.push({
       type,
       score,
+      material: type === "case" ? material : null,
       stem,
       analysis,
       options: options.map(opt => [String(opt[0]).trim(), String(opt[1])]),
@@ -305,6 +314,7 @@ app.post("/api/attempts/:id/answers", asyncHandler(async (req, res) => {
       seq: question.seq,
       type: question.type,
       score: question.score,
+      material: question.material,
       stem: question.stem,
       options: question.options,
       answer: question.answer,
@@ -411,7 +421,7 @@ app.get("/api/attempts/:id", asyncHandler(async (req, res) => {
       : null,
     Answer.findAll({
       attributes: [
-        "seq", "type", "score", "stem", "options", "answer", "analysis",
+        "seq", "type", "score", "material", "stem", "options", "answer", "analysis",
         "chosen", "is_correct", "earned", "answered_at",
       ],
       where: { attempt_id: attempt.id },
@@ -424,6 +434,7 @@ app.get("/api/attempts/:id", asyncHandler(async (req, res) => {
     attempt: { ...attempt, paper_exists: paper ? 1 : 0 },
     detail: detail.map(row => ({
       ...row,
+      material: row.material || "",
       options: parseJson(row.options, []),
       answer: parseJson(row.answer, []),
       chosen: row.chosen ? parseJson(row.chosen, []) : [],
