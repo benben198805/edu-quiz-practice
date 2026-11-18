@@ -264,6 +264,7 @@
     cursor:pointer;user-select:none;
   }
   .ov-right{display:inline-flex;align-items:center;gap:6px;}
+  #ovCount{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap;}
   .ov-toggle{
     display:inline-flex;align-items:center;justify-content:center;
     width:20px;height:20px;border-radius:6px;
@@ -327,8 +328,41 @@
   @media (max-width:960px){
     .layout{flex-direction:column;}
     .main-col{max-width:none;width:100%;}
-    .side-col{position:static;width:100%;flex:none;order:-1;}
+    /* 手机/窄屏：答题进度总览改为右下角浮动圆钮，点击展开面板，不再独占一行 */
+    .side-col{position:fixed;right:14px;bottom:14px;top:auto;width:auto;flex:none;order:0;z-index:900;}
+    .overview-card{
+      width:58px;height:58px;padding:0;border-radius:50%;overflow:hidden;
+      display:flex;align-items:center;justify-content:center;
+      background:var(--primary);border-color:var(--primary);color:#fff;
+      box-shadow:0 8px 22px rgba(59,110,245,.38);cursor:pointer;
+      transition:width .18s ease,height .18s ease,border-radius .18s ease,background .18s ease;
+    }
+    .overview-head{width:100%;height:100%;margin:0;justify-content:center;}
+    .overview-head > span:first-child{display:none;}
+    .ov-right{gap:0;}
+    .overview-card #ovCount{color:#fff;font-size:12.5px;font-weight:800;}
+    .overview-card .ov-toggle{display:none;}
+    .overview-card:not(.collapsed){
+      width:min(340px,calc(100vw - 28px));height:auto;padding:14px;border-radius:14px;
+      display:block;background:#fff;color:var(--text);border-color:var(--border);
+      box-shadow:0 14px 40px rgba(15,23,42,.24);overflow:hidden;
+    }
+    .overview-card:not(.collapsed) .overview-head{
+      width:auto;height:auto;margin-bottom:10px;justify-content:space-between;
+    }
+    .overview-card:not(.collapsed) .overview-head > span:first-child{display:inline;}
+    .overview-card:not(.collapsed) #ovCount{color:var(--muted);font-size:12px;font-weight:700;}
+    .overview-card:not(.collapsed) .ov-toggle{display:inline-flex;transform:rotate(180deg);}
+    .overview-card:not(.collapsed) .overview-body{
+      display:block;max-height:calc(100vh - 150px);overflow:auto;
+    }
     .qgrid{grid-template-columns:repeat(15,1fr);}
+  }
+  @media (max-width:560px){
+    /* 窄屏导航：隐藏品牌与上下文，三个入口等宽单行显示 */
+    .topbar{gap:6px;padding:7px 8px;flex-wrap:nowrap;}
+    .topbar .brand,.topbar .spacer,#navCtx{display:none;}
+    .nav-btn{flex:1 1 0;min-width:0;padding:6px 4px;font-size:12.5px;white-space:nowrap;text-align:center;}
   }
   @media (max-width:520px){
     body{padding:14px 8px 50px;}
@@ -337,7 +371,6 @@
     .qgrid{grid-template-columns:repeat(10,1fr);}
     .review-toolbar{gap:6px;padding:10px 11px;}
     .filter-btn{padding:5px 11px;font-size:12.5px;}
-    .topbar{padding:8px 10px;}
   }
 
   #printArea{display:none;}
@@ -477,7 +510,7 @@
       <div class="overview-head" id="ovHead" title="点击展开 / 收起">
         <span>答题进度总览</span>
         <span class="ov-right">
-          <span id="ovCount" style="font-size:12px;color:var(--muted);font-weight:600;">0 / 0</span>
+          <span id="ovCount">0 / 0</span>
           <span class="ov-toggle" id="ovToggle">▾</span>
         </span>
       </div>
@@ -974,6 +1007,9 @@ async function enterPaper(paperId){
     // 这样“点进来看一眼就退出”不会产生历史记录。
     attemptId = null;
 
+    // 手机端总览默认收成浮动圆钮
+    if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
+
     $("quizPaperName").textContent = currentPaper.name;
     $("navCtx").textContent = "正在作答：" + currentPaper.name;
     showView("viewQuiz");
@@ -1207,11 +1243,18 @@ async function loadHistory(){
   $("loadingMask").classList.remove("hidden");
   $("navCtx").textContent = historyFilter ? "答题历史：" + historyFilter : "";
   try{
-    HISTORY_ROWS = await fetch("/api/attempts").then(r=>r.json());
+    const res = await fetch("/api/attempts");
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if(!Array.isArray(data)) throw new Error("返回数据格式异常");
+    HISTORY_ROWS = data;
     renderHistoryOptions();
     renderHistoryList();
   }catch(err){
-    $("historyList").innerHTML = `<div class="empty-hint">加载失败：${esc(err.message)}</div>`;
+    console.error("加载答题历史失败：", err);
+    HISTORY_ROWS = [];
+    $("historyCount").textContent = "";
+    $("historyList").innerHTML = `<div class="empty-hint">答题历史暂时无法加载，请稍后刷新重试。</div>`;
   }finally{
     $("loadingMask").classList.add("hidden");
   }
@@ -1220,7 +1263,8 @@ async function loadHistory(){
 function renderHistoryOptions(){
   const sel = $("historyPaperFilter");
   const seen = new Map();
-  HISTORY_ROWS.forEach(a=>{
+  const rows = Array.isArray(HISTORY_ROWS) ? HISTORY_ROWS : [];
+  rows.forEach(a=>{
     const key = a.paper_name || "";
     if(!seen.has(key)){
       seen.set(key, { name: a.paper_name || "（未记录套题）", deleted: !a.paper_exists, count: 0 });
@@ -1235,7 +1279,7 @@ function renderHistoryOptions(){
   sel.innerHTML = "";
   const all = document.createElement("option");
   all.value = "";
-  all.textContent = `全部套题（${HISTORY_ROWS.length}）`;
+  all.textContent = `全部套题（${rows.length}）`;
   sel.appendChild(all);
   seen.forEach((v, key)=>{
     const opt = document.createElement("option");
@@ -1248,21 +1292,22 @@ function renderHistoryOptions(){
 
 function renderHistoryList(){
   const box = $("historyList");
-  const rows = historyFilter
-    ? HISTORY_ROWS.filter(a => (a.paper_name || "") === historyFilter)
-    : HISTORY_ROWS;
+  const rows = Array.isArray(HISTORY_ROWS) ? HISTORY_ROWS : [];
+  const filtered = historyFilter
+    ? rows.filter(a => (a.paper_name || "") === historyFilter)
+    : rows;
 
   $("historyCount").textContent = historyFilter
-    ? `筛选出 ${rows.length} 条 / 共 ${HISTORY_ROWS.length} 条`
-    : `共 ${HISTORY_ROWS.length} 条`;
+    ? `筛选出 ${filtered.length} 条 / 共 ${rows.length} 条`
+    : `共 ${rows.length} 条`;
 
   box.innerHTML = "";
-  if(!rows.length){
-    box.innerHTML = `<div class="empty-hint">${historyFilter ? "该套题暂无答题记录。" : "暂无历史记录。"}</div>`;
+  if(!filtered.length){
+    box.innerHTML = `<div class="empty-hint">${historyFilter ? "该套题暂无答题记录。" : "还没有答题记录，完成一次练习后会显示在这里。"}</div>`;
     return;
   }
 
-  rows.forEach(a=>{
+  filtered.forEach(a=>{
     const div = document.createElement("div");
     div.className = "history-item";
     const unfinished = !a.finished_at;
