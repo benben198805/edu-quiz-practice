@@ -431,7 +431,9 @@ app.get("/api/attempts/:id", asyncHandler(async (req, res) => {
   ]);
 
   res.json({
-    attempt: { ...attempt, paper_exists: paper ? 1 : 0 },
+    // current_paper_id 供“继续作答”重新拉取题目：删除后重新导入同名套题时
+    // attempts.paper_id 已被置空，这里按套题名重新解析。
+    attempt: { ...attempt, paper_exists: paper ? 1 : 0, current_paper_id: paper ? paper.id : null },
     detail: detail.map(row => ({
       ...row,
       material: row.material || "",

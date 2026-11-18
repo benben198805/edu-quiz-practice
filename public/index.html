@@ -173,7 +173,9 @@
   .history-item .meta .meta-txt{min-width:0;}
   .btn-danger{background:#fff;color:var(--wrong);border:1.5px solid #f3b6b7;}
   .btn-danger:hover:not(:disabled){background:var(--wrong-bg);}
+  .history-item .meta-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
   .history-item .del-btn{padding:4px 12px;font-size:12.5px;border-radius:8px;flex:0 0 auto;}
+  .history-item .resume-btn{padding:4px 12px;font-size:12.5px;border-radius:8px;flex:0 0 auto;}
   .tag-unfinished{
     display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;
     background:#fff4e5;color:#b45309;margin-left:6px;
@@ -285,7 +287,10 @@
     aspect-ratio:1/1;border-radius:4px;background:#e5e7eb;
     display:flex;align-items:center;justify-content:center;
     font-size:9.5px;font-weight:700;color:#6b7280;border:1px solid #d1d5db;user-select:none;
+    cursor:pointer;transition:transform .12s ease,box-shadow .12s ease;
   }
+  .qcell:hover{transform:scale(1.12);box-shadow:0 2px 8px rgba(31,41,55,.18);}
+  .qcell.current{box-shadow:0 0 0 2px var(--primary);}
   .qcell.done-ok{background:var(--correct);border-color:var(--correct);color:#fff;}
   .qcell.done-no{background:var(--wrong);border-color:var(--wrong);color:#fff;}
 
@@ -470,6 +475,7 @@
         <div class="actions">
           <button class="btn-primary" id="submitBtn">提交本题</button>
           <button class="btn-ghost" id="nextBtn" style="display:none;">下一题 →</button>
+          <button class="btn-ghost" id="reanswerBtn" style="display:none;">重新作答本题</button>
         </div>
         <div id="resultBox"></div>
       </div>
@@ -583,7 +589,9 @@ let detailPaper = null;
 let detailQuestions = [];
 let detailFilter = "all";
 
-let state = { index:0, answers:[], submitted:[], earned:[] };
+let state = { index:0, answers:[], submitted:[], earned:[], saved:[], reopened:[] };
+// 答题来源：papers（新练习）/ history（继续未完成记录）
+let quizOrigin = "papers";
 
 function formatScore(n){
   const v = Math.round(Number(n) * 10) / 10;
@@ -1000,8 +1008,11 @@ async function enterPaper(paperId){
       index:0,
       answers:new Array(QUESTIONS.length).fill(null),
       submitted:new Array(QUESTIONS.length).fill(false),
-      earned:new Array(QUESTIONS.length).fill(0)
+      earned:new Array(QUESTIONS.length).fill(0),
+      saved:new Array(QUESTIONS.length).fill(null),
+      reopened:new Array(QUESTIONS.length).fill(false)
     };
+    quizOrigin = "papers";
 
     // 先不创建练习记录：只有真正提交第一题时才写入数据库，
     // 这样“点进来看一眼就退出”不会产生历史记录。
@@ -1017,6 +1028,64 @@ async function enterPaper(paperId){
     window.scrollTo({top:0, behavior:"smooth"});
   }catch(err){
     alert("进入套题失败：" + err.message);
+  }finally{
+    $("loadingMask").classList.add("hidden");
+  }
+}
+
+/* ================= 继续未完成的练习 ================= */
+async function resumeAttempt(id){
+  $("loadingMask").classList.remove("hidden");
+  try{
+    const data = await fetch(`/api/attempts/${id}`).then(r=>r.json());
+    const paperId = data.attempt && data.attempt.current_paper_id;
+    if(!paperId) throw new Error("该套题已被删除，无法继续作答");
+
+    const res = await fetch(`/api/papers/${paperId}/questions`);
+    if(!res.ok) throw new Error("套题加载失败");
+    const paperData = await res.json();
+    if(!paperData.questions.length) throw new Error("该套题暂无题目");
+
+    currentPaper = paperData.paper;
+    QUESTIONS = paperData.questions;
+    TOTAL_MAX = QUESTIONS.reduce((s,q)=>s+Number(q.score),0);
+    GROUPS = buildGroups(QUESTIONS);
+
+    // 已提交的题目按 seq 与题目对齐，恢复选项、得分和“已作答”状态
+    const snapshots = new Map((data.detail || []).map(d=>[Number(d.seq), d]));
+    state = {
+      index:0,
+      answers:new Array(QUESTIONS.length).fill(null),
+      submitted:new Array(QUESTIONS.length).fill(false),
+      earned:new Array(QUESTIONS.length).fill(0),
+      saved:new Array(QUESTIONS.length).fill(null),
+      reopened:new Array(QUESTIONS.length).fill(false)
+    };
+    QUESTIONS.forEach((q,i)=>{
+      const d = snapshots.get(Number(q.seq));
+      if(!d) return;
+      const chosen = Array.isArray(d.chosen) ? d.chosen : [];
+      state.answers[i] = chosen.length ? [...chosen] : null;
+      state.saved[i] = chosen.length ? [...chosen] : null;
+      state.submitted[i] = true;
+      state.earned[i] = Number(d.earned) || 0;
+    });
+
+    // 定位到第一道未作答的题；全部答完则停在最后一题，可直接查看总分
+    const firstUnanswered = state.submitted.findIndex(s=>!s);
+    state.index = firstUnanswered === -1 ? QUESTIONS.length - 1 : firstUnanswered;
+    attemptId = data.attempt.id;
+    quizOrigin = "history";
+
+    if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
+
+    $("quizPaperName").textContent = currentPaper.name;
+    $("navCtx").textContent = "继续作答：" + currentPaper.name;
+    showView("viewQuiz");
+    renderQuestion();
+    window.scrollTo({top:0, behavior:"smooth"});
+  }catch(err){
+    alert("继续作答失败：" + err.message);
   }finally{
     $("loadingMask").classList.add("hidden");
   }
@@ -1066,9 +1135,17 @@ function renderOverview(){
       const cell = document.createElement("div");
       cell.className = "qcell";
       cell.textContent = i+1;
+      cell.setAttribute("role", "button");
+      cell.tabIndex = 0;
+      cell.title = `第 ${i+1} 题` + (state.submitted[i] ? "（已作答，可跳转重新作答）" : "（点击跳转）");
+      cell.addEventListener("click", ()=>jumpToQuestion(i));
+      cell.addEventListener("keydown", e=>{
+        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); jumpToQuestion(i); }
+      });
       if(state.submitted[i]){
         cell.classList.add(isCorrect(i) ? "done-ok" : "done-no");
       }
+      if(i === state.index) cell.classList.add("current");
       grid.appendChild(cell);
     }
     sec.appendChild(grid);
@@ -1077,6 +1154,34 @@ function renderOverview(){
   const done = state.submitted.filter(Boolean).length;
   $("ovCount").textContent = `${done} / ${QUESTIONS.length}`;
 }
+
+/* 离开当前题时，放弃未提交的“重新作答”改动，恢复上一次提交的内容 */
+function leaveReopened(){
+  const i = state.index;
+  if(!state.reopened[i]) return;
+  state.answers[i] = state.saved[i] ? [...state.saved[i]] : null;
+  state.reopened[i] = false;
+}
+
+/* 从总览跳转到指定题；已作答的题目可点“重新作答本题”覆盖原答案 */
+function jumpToQuestion(i){
+  if(i < 0 || i >= QUESTIONS.length) return;
+  if(i !== state.index){
+    leaveReopened();
+    state.index = i;
+  }
+  if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
+  renderQuestion();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+$("reanswerBtn").addEventListener("click", ()=>{
+  const i = state.index;
+  if(!state.submitted[i] || state.reopened[i]) return;
+  state.reopened[i] = true;
+  renderQuestion();
+  window.scrollTo({top:0, behavior:"smooth"});
+});
 
 /* ================= 答题渲染 ================= */
 function isCorrect(i){
@@ -1089,6 +1194,8 @@ function renderQuestion(){
   const i = state.index, q = QUESTIONS[i];
   if(!q){ showSummary(); return; }
   const submitted = state.submitted[i];
+  const reopened = !!state.reopened[i];
+  const locked = submitted && !reopened;
   const chosen = state.answers[i] || [];
 
   $("qNum").textContent = `第 ${i+1} 题`;
@@ -1106,23 +1213,25 @@ function renderQuestion(){
   q.options.forEach(([key, text])=>{
     const div = document.createElement("div");
     div.className = "opt";
-    if(submitted){
+    if(locked){
       div.classList.add("locked");
       if(q.answer.includes(key)) div.classList.add("correct");
       else if(chosen.includes(key)) div.classList.add("wrong");
     } else if(chosen.includes(key)) div.classList.add("selected");
     div.innerHTML = `<span class="marker">${key}</span><span>${text}</span>`;
-    if(!submitted) div.addEventListener("click", ()=>toggleOption(key));
+    if(!locked) div.addEventListener("click", ()=>toggleOption(key));
     opts.appendChild(div);
   });
 
-  $("submitBtn").style.display = submitted ? "none" : "inline-block";
-  $("nextBtn").style.display = submitted ? "inline-block" : "none";
+  $("submitBtn").style.display = locked ? "none" : "inline-block";
+  $("nextBtn").style.display = locked ? "inline-block" : "none";
+  $("reanswerBtn").style.display = locked ? "inline-block" : "none";
   $("submitBtn").disabled = chosen.length === 0;
+  $("submitBtn").textContent = "提交本题";
   $("nextBtn").textContent = (i === QUESTIONS.length-1) ? "查看总分与回顾 →" : "下一题 →";
 
   const rb = $("resultBox"); rb.innerHTML = ""; rb.className = "";
-  if(submitted){
+  if(locked){
     const ok = isCorrect(i);
     rb.className = "result-box " + (ok?"ok":"no");
     rb.innerHTML = `
@@ -1130,6 +1239,9 @@ function renderQuestion(){
       <div class="res-line">你的答案：<b>${(state.answers[i]||[]).sort().join("")||"（未选）"}</b>　｜　正确答案：<b class="c">${[...q.answer].sort().join("")}</b></div>
       <div class="analysis"><span class="lbl">【解析】</span>${q.analysis}</div>
     `;
+  } else if(reopened){
+    rb.className = "tips";
+    rb.innerHTML = "本题已作答，可重新选择答案后提交；仍保留原作答，离开本题即放弃本次修改。";
   }
 
   renderOverview();
@@ -1176,7 +1288,7 @@ async function discardEmptyAttempt(){
 
 async function submitCurrent(){
   const i = state.index;
-  if(state.submitted[i] || !state.answers[i]) return;
+  if((state.submitted[i] && !state.reopened[i]) || !state.answers[i]) return;
   const q = QUESTIONS[i];
   const btn = $("submitBtn"); btn.disabled = true; btn.textContent = "提交中…";
   try{
@@ -1185,8 +1297,12 @@ async function submitCurrent(){
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ questionId:q.id, chosen:state.answers[i] })
     }).then(r=>r.json());
+    if(r.error) throw new Error(r.error);
+    // 服务端按 (attempt_id, seq) upsert，同题重复提交以最新一次为准
     state.submitted[i] = true;
     state.earned[i] = Number(r.earned) || 0;
+    state.saved[i] = [...state.answers[i]];
+    state.reopened[i] = false;
   }catch(err){
     alert("提交失败：" + err.message);
   }finally{
@@ -1196,6 +1312,7 @@ async function submitCurrent(){
 }
 
 function nextQuestion(){
+  leaveReopened();
   if(state.index < QUESTIONS.length-1){
     state.index++;
     renderQuestion();
@@ -1207,6 +1324,7 @@ function nextQuestion(){
 
 /* ================= 答题结束 → 结果页 ================= */
 async function showSummary(){
+  leaveReopened();
   if(attemptId){
     try{
       await fetch(`/api/attempts/${attemptId}/finish`, {method:"POST"});
@@ -1234,6 +1352,11 @@ async function showSummary(){
   };
   resultFrom = "quiz";
   renderResult(resultData, "quiz");
+  // 从历史记录继续作答的，结束后回到历史列表（该记录已更新为已完成）
+  if(quizOrigin === "history"){
+    resultFrom = "history";
+    $("backFromResult").onclick = ()=>setTab("history");
+  }
   showView("viewResult");
   window.scrollTo({top:0, behavior:"smooth"});
 }
@@ -1313,6 +1436,8 @@ function renderHistoryList(){
     const unfinished = !a.finished_at;
     const name = a.paper_name || "（未记录套题）";
     const deletedTag = a.paper_exists ? "" : '<span class="tag-deleted">套题已删除</span>';
+    // 未完成且套题仍存在的记录可以直接继续作答
+    const canResume = unfinished && !!a.paper_exists;
     div.innerHTML = `
       <div class="row1">
         <span class="name">${esc(name)}${deletedTag}${unfinished?'<span class="tag-unfinished">未完成</span>':''}</span>
@@ -1320,10 +1445,18 @@ function renderHistoryList(){
       </div>
       <div class="meta">
         <span class="meta-txt">答对 ${a.correct} / ${a.answered} 题 ｜ 开始：${esc(a.started_at)}${a.finished_at?' ｜ 完成：'+esc(a.finished_at):''}</span>
-        <button class="btn-danger btn-small del-btn" type="button" title="删除这条历史记录">删除</button>
+        <span class="meta-actions">
+          ${canResume?'<button class="btn-primary btn-small resume-btn" type="button" title="接着上次的进度继续作答">继续作答</button>':''}
+          <button class="btn-danger btn-small del-btn" type="button" title="删除这条历史记录">删除</button>
+        </span>
       </div>
     `;
     div.addEventListener("click", ()=>openHistoryDetail(a.id));
+    const resumeBtn = div.querySelector(".resume-btn");
+    if(resumeBtn) resumeBtn.addEventListener("click", (e)=>{
+      e.stopPropagation(); // 不要触发外层的“打开详情”
+      resumeAttempt(a.id);
+    });
     div.querySelector(".del-btn").addEventListener("click", async (e)=>{
       e.stopPropagation(); // 不要触发外层的“打开详情”
       const ok = await deleteAttempt(a.id, e.currentTarget, a);
