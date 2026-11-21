@@ -1,7 +1,11 @@
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const { Op, fn, col, literal } = require("sequelize");
-const { sequelize, Paper, Question, Attempt, Answer } = require("./db");
+const {
+  sequelize, Paper, Question, Attempt, Answer,
+  WrongQuestion, ReviewSession, ReviewItem,
+} = require("./db");
 const { nowLocal } = require("./db/time");
 
 const app = express();
@@ -342,23 +346,81 @@ app.post("/api/attempts/:id/answers", asyncHandler(async (req, res) => {
   res.json({ isCorrect, earned });
 }));
 
-/* ---------- 结束一次练习 ---------- */
+/* ---------- 结束一次练习：结算成绩并收集错题 ---------- */
 app.post("/api/attempts/:id/finish", asyncHandler(async (req, res) => {
   const attemptId = Number(req.params.id);
   if (!attemptId) return res.status(400).json({ error: "缺少记录 id" });
 
-  await sequelize.transaction(async transaction => {
-    await refreshAttempt(attemptId, transaction);
-    await Attempt.update(
-      { finished_at: nowLocal() },
-      { where: { id: attemptId }, transaction }
-    );
+  const row = await sequelize.transaction(async transaction => {
+    const attempt = await Attempt.findByPk(attemptId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!attempt) return null;
+
+    // 只结算一次：重复调用不会重复累计错题次数。
+    if (!attempt.finished_at) {
+      await refreshAttempt(attemptId, transaction);
+      await collectWrongAnswers(attempt, transaction);
+      await attempt.update({ finished_at: nowLocal() }, { transaction });
+    }
+
+    return Attempt.findByPk(attemptId, { raw: true, transaction });
   });
 
-  const row = await Attempt.findByPk(attemptId, { raw: true });
   if (!row) return res.status(404).json({ error: "记录不存在" });
   res.json(row);
 }));
+
+/* 把本次已答错题写入错题集；按套题名 + 题号去重，多次做错累计次数。 */
+async function collectWrongAnswers(attempt, transaction) {
+  const rows = await Answer.findAll({
+    where: { attempt_id: attempt.id, is_correct: 0 },
+    order: [["seq", "ASC"]],
+    raw: true,
+    transaction,
+  });
+  const now = nowLocal();
+
+  for (const row of rows) {
+    const snapshot = {
+      paper_id: attempt.paper_id,
+      type: row.type,
+      score: row.score,
+      material: row.material,
+      stem: row.stem,
+      options: row.options,
+      answer: row.answer,
+      analysis: row.analysis,
+      last_chosen: row.chosen || JSON.stringify([]),
+    };
+    const existing = await WrongQuestion.findOne({
+      where: { paper_name: attempt.paper_name, seq: row.seq },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (existing) {
+      await existing.update({
+        ...snapshot,
+        wrong_count: Number(existing.wrong_count) + 1,
+        mastered: 0,
+        mastered_at: null,
+        last_wrong_at: now,
+      }, { transaction });
+    } else {
+      await WrongQuestion.create({
+        ...snapshot,
+        paper_name: attempt.paper_name,
+        seq: row.seq,
+        wrong_count: 1,
+        mastered: 0,
+        first_wrong_at: now,
+        last_wrong_at: now,
+      }, { transaction });
+    }
+  }
+}
 
 async function refreshAttempt(attemptId, transaction) {
   const stats = await Answer.findOne({
@@ -442,6 +504,256 @@ app.get("/api/attempts/:id", asyncHandler(async (req, res) => {
       chosen: row.chosen ? parseJson(row.chosen, []) : [],
     })),
   });
+}));
+
+/* ================= 错题集 ================= */
+
+function sessionSummary(row) {
+  return {
+    id: row.id,
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+    total: Number(row.total) || 0,
+    answered: Number(row.answered) || 0,
+    correct: Number(row.correct) || 0,
+  };
+}
+
+function decorateWrongQuestion(row, paperNames) {
+  return {
+    ...row,
+    material: row.material || "",
+    options: parseJson(row.options, []),
+    answer: parseJson(row.answer, []),
+    last_chosen: row.last_chosen ? parseJson(row.last_chosen, []) : [],
+    mastered: Number(row.mastered) ? 1 : 0,
+    paper_exists: paperNames.has(row.paper_name) ? 1 : 0,
+  };
+}
+
+/* 错题列表 + 待复习/已掌握统计 + 可续做的练习会话 */
+app.get("/api/wrong-questions", asyncHandler(async (req, res) => {
+  const [rows, papers, active] = await Promise.all([
+    WrongQuestion.findAll({
+      order: [["mastered", "ASC"], ["last_wrong_at", "DESC"], ["id", "DESC"]],
+      raw: true,
+    }),
+    Paper.findAll({ attributes: ["name"], raw: true }),
+    ReviewSession.findOne({
+      where: { finished_at: null },
+      order: [["id", "DESC"]],
+      raw: true,
+    }),
+  ]);
+  const paperNames = new Set(papers.map(paper => paper.name));
+  const items = rows.map(row => decorateWrongQuestion(row, paperNames));
+  const mastered = items.filter(item => item.mastered).length;
+
+  res.json({
+    items,
+    stats: { total: items.length, active: items.length - mastered, mastered },
+    active_session: active ? sessionSummary(active) : null,
+  });
+}));
+
+/* 随机错题练习：默认复用未完成会话；restart=true 时丢弃旧进度重新洗牌。 */
+app.post("/api/wrong-questions/review-sessions", asyncHandler(async (req, res) => {
+  const restart = !!(req.body && req.body.restart);
+  const existing = await ReviewSession.findOne({
+    where: { finished_at: null },
+    order: [["id", "DESC"]],
+    raw: true,
+  });
+
+  if (existing && !restart) {
+    return res.json(await buildReviewPayload(existing.id));
+  }
+
+  const sessionId = await sequelize.transaction(async transaction => {
+    if (existing) {
+      await ReviewSession.destroy({ where: { id: existing.id }, transaction });
+    }
+    const rows = await WrongQuestion.findAll({
+      where: { mastered: 0 },
+      order: [["id", "ASC"]],
+      raw: true,
+      transaction,
+    });
+    if (!rows.length) return null;
+
+    // 随机顺序固定写入会话，续做时不再变化。
+    const shuffled = shuffleRows(rows);
+    const session = await ReviewSession.create({
+      started_at: nowLocal(),
+      total: shuffled.length,
+    }, { transaction });
+    await ReviewItem.bulkCreate(shuffled.map((row, index) => ({
+      session_id: session.id,
+      wrong_question_id: row.id,
+      position: index + 1,
+    })), { transaction });
+    return session.id;
+  });
+
+  if (!sessionId) return res.status(400).json({ error: "暂无待复习的错题" });
+  res.json(await buildReviewPayload(sessionId));
+}));
+
+function shuffleRows(rows) {
+  for (let i = rows.length - 1; i > 0; i -= 1) {
+    const j = crypto.randomInt(i + 1);
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+  }
+  return rows;
+}
+
+async function buildReviewPayload(sessionId, transaction) {
+  const session = await ReviewSession.findByPk(sessionId, { raw: true, transaction });
+  if (!session) return null;
+
+  const items = await ReviewItem.findAll({
+    where: { session_id: sessionId },
+    order: [["position", "ASC"]],
+    raw: true,
+    transaction,
+  });
+  const ids = items.map(item => item.wrong_question_id);
+  const rows = ids.length
+    ? await WrongQuestion.findAll({ where: { id: { [Op.in]: ids } }, raw: true, transaction })
+    : [];
+  const byId = new Map(rows.map(row => [Number(row.id), row]));
+
+  return {
+    session: sessionSummary(session),
+    items: items.map(item => {
+      const row = byId.get(Number(item.wrong_question_id));
+      return {
+        wrong_question_id: row.id,
+        position: item.position,
+        paper_id: row.paper_id,
+        paper_name: row.paper_name,
+        seq: row.seq,
+        type: row.type,
+        score: row.score,
+        material: row.material || "",
+        stem: row.stem,
+        options: parseJson(row.options, []),
+        answer: parseJson(row.answer, []),
+        analysis: row.analysis,
+        wrong_count: Number(row.wrong_count) || 0,
+        mastered: Number(row.mastered) ? 1 : 0,
+        chosen: item.chosen ? parseJson(item.chosen, []) : [],
+        is_correct: item.is_correct === null ? null : Number(item.is_correct),
+        answered_at: item.answered_at,
+      };
+    }),
+  };
+}
+
+/* 读取一次错题练习（含随机顺序与已作答进度） */
+app.get("/api/wrong-questions/review-sessions/:id", asyncHandler(async (req, res) => {
+  const sessionId = Number(req.params.id);
+  if (!sessionId) return res.status(400).json({ error: "缺少练习 id" });
+  const payload = await buildReviewPayload(sessionId);
+  if (!payload) return res.status(404).json({ error: "练习不存在" });
+  res.json(payload);
+}));
+
+/* 提交一道错题：答对立即标记已掌握；答错次数 +1 并保留待复习。 */
+app.post("/api/wrong-questions/review-sessions/:id/answers", asyncHandler(async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const wrongQuestionId = Number(req.body && req.body.wrongQuestionId);
+  const chosen = Array.isArray(req.body && req.body.chosen)
+    ? req.body.chosen.map(String)
+    : [];
+  if (!sessionId || !wrongQuestionId) {
+    return res.status(400).json({ error: "缺少练习 id 或错题 id" });
+  }
+  if (!chosen.length) return res.status(400).json({ error: "请先选择答案" });
+
+  const outcome = await sequelize.transaction(async transaction => {
+    const session = await ReviewSession.findByPk(sessionId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!session) return { status: 404, error: "练习不存在" };
+    if (session.finished_at) return { status: 409, error: "本次错题练习已结束" };
+
+    const item = await ReviewItem.findOne({
+      where: { session_id: sessionId, wrong_question_id: wrongQuestionId },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!item) return { status: 404, error: "题目不在本次练习中" };
+    if (item.is_correct !== null) return { status: 409, error: "本题已提交" };
+
+    const row = await WrongQuestion.findByPk(wrongQuestionId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!row) return { status: 404, error: "错题不存在" };
+
+    const right = parseJson(row.answer, []).slice().sort().join("");
+    const user = chosen.slice().sort().join("");
+    const isCorrect = right === user;
+    const now = nowLocal();
+    let wrongCount = Number(row.wrong_count) || 0;
+
+    await item.update({
+      chosen: JSON.stringify(chosen),
+      is_correct: isCorrect ? 1 : 0,
+      answered_at: now,
+    }, { transaction });
+
+    if (isCorrect) {
+      await row.update({ mastered: 1, mastered_at: now }, { transaction });
+    } else {
+      wrongCount += 1;
+      await row.update({
+        mastered: 0,
+        mastered_at: null,
+        last_chosen: JSON.stringify(chosen),
+        wrong_count: wrongCount,
+        last_wrong_at: now,
+      }, { transaction });
+    }
+
+    const answered = Number(session.answered) + 1;
+    const correct = Number(session.correct) + (isCorrect ? 1 : 0);
+    const finishedAt = answered >= Number(session.total) ? now : session.finished_at;
+    await session.update(
+      { answered, correct, finished_at: finishedAt },
+      { transaction }
+    );
+
+    return {
+      status: 200,
+      isCorrect,
+      wrongCount,
+      mastered: isCorrect ? 1 : 0,
+      correct_answer: parseJson(row.answer, []),
+      analysis: row.analysis,
+      session: sessionSummary({ ...session.toJSON(), answered, correct, finished_at: finishedAt }),
+    };
+  });
+
+  if (outcome.status !== 200) {
+    return res.status(outcome.status).json({ error: outcome.error });
+  }
+  res.json(outcome);
+}));
+
+/* 结束错题练习；未答完也允许结束，未答题目保留待复习。 */
+app.post("/api/wrong-questions/review-sessions/:id/finish", asyncHandler(async (req, res) => {
+  const sessionId = Number(req.params.id);
+  if (!sessionId) return res.status(400).json({ error: "缺少练习 id" });
+
+  const session = await ReviewSession.findByPk(sessionId);
+  if (!session) return res.status(404).json({ error: "练习不存在" });
+  if (!session.finished_at) {
+    await session.update({ finished_at: nowLocal() });
+  }
+  res.json({ ok: true, session: sessionSummary(session) });
 }));
 
 app.use((err, req, res, next) => {

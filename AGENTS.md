@@ -31,7 +31,8 @@
 │   ├── V1__init.sql          MySQL 5.7 初始表结构
 │   ├── V2__seed_papers.sql   旧库导出：20 套题、1800 题
 │   ├── V3__seed_attempts.sql 旧库导出：4 次历史、360 条作答快照
-│   └── V4__add_case_material.sql 案例分析题：questions/answers 增加 material 列
+│   ├── V4__add_case_material.sql 案例分析题：questions/answers 增加 material 列
+│   └── V5__add_wrong_questions.sql 错题集与随机练习会话，并回填已完成历史错题
 ├── scripts/migrate.js        迁移执行器（migrate / --status）
 ├── public/index.html         唯一前端文件：样式、页面、全部交互
 ├── papers_data/              题目源 JSON（paper-01.json … paper-20.json）
@@ -112,6 +113,9 @@ SKIP_MIGRATE=1 ./restart.sh
 |`questions`|套题题目，`UNIQUE(paper_id, seq)`，随套题级联删除|
 |`attempts`|一次练习，带 `paper_id` 与 `paper_name` 快照|
 |`answers`|一次作答，**同时保存完整题目快照**（seq/type/score/material/stem/options/answer/analysis）|
+|`wrong_questions`|错题集，**独立保存完整题目快照** + `last_chosen`/`wrong_count`/`mastered`，`UNIQUE(paper_name, seq)`|
+|`review_sessions`|一次错题练习，`finished_at` 为空表示可续做|
+|`review_items`|练习内题目与随机顺序，`UNIQUE(session_id, wrong_question_id)`、`UNIQUE(session_id, position)`|
 |`schema_migrations`|已执行的迁移版本、描述、SHA-256 校验和、执行时间|
 
 必须保持的规则：
@@ -124,6 +128,8 @@ SKIP_MIGRATE=1 ./restart.sh
 6. 迁移只增不改：已执行的 `VN__*.sql` 不要修改，校验和不一致时执行器会拒绝运行；结构变更新增 `V(N+1)__*.sql`。
 7. MySQL 5.7 语法：不要使用 CTE、窗口函数；索引列总长度控制在 767 字节内（`papers.name` / `attempts.paper_name` 为 `VARCHAR(100)` utf8mb4，安全）。
 8. `sequelize.sync()` 不参与运行；表结构以 `migrations/` 为准。
+9. **错题集独立于历史**：`wrong_questions` 保存完整快照，删除 `attempts`/`answers` 或套题都不影响错题；`paper_id` 弱引用（删套题后 `SET NULL`），列表按 `paper_name` 标记“套题已删除”。
+10. 错题按 `(paper_name, seq)` 去重：首次入库 `wrong_count=1`，之后正常试卷或错题练习再错都 `+1`、更新 `last_chosen`，并把 `mastered` 重置为 0；错题练习答对立即 `mastered=1`，后续随机练习不再抽取，但记录保留可筛选查看。
 
 ## 核心功能
 
@@ -131,6 +137,7 @@ SKIP_MIGRATE=1 ./restart.sh
 - **答题**：逐题作答，支持判断题/单选题/多项选择题/案例分析题；案例分析题先显示 `material` 案例材料再显示题干，作答为多选。键盘 `A~E` 选择、`Enter` 提交/下一题；侧边题号总览用颜色标识对错，点击题号可跳转任意题目，已作答题目可「重新作答本题」，重复提交按 `(attempt_id, seq)` 覆盖，成绩与历史以最新一次为准。
 - **结果页**：总分、按题型统计、逐题回顾，可按全部/正确/错误筛选，导出 PDF（浏览器打印）。
 - **答题历史**：按套题下拉筛选（客户端筛选，选项带次数，已删套题标注），可查看任意历史详情、删除单条记录；未完成（`finished_at` 为空）且套题仍存在的记录显示「继续作答」，恢复已提交题目的选项与得分后接着答，结束后写回同一条记录。首次提交作答才创建记录，未答则不留痕。
+- **错题集**：结束整套练习时，把已作答且判错的题写入错题集（未作答不收录），保留选项、上次错选、来源套题、错误次数。可按待复习/已掌握筛选；「随机重做错题」把所有待复习错题洗牌后逐题作答，答对立即标记「已掌握」并排除出后续抽取，答错次数 +1；练习进度落库，可中断续做，但不进入答题历史。
 - **套题管理**：卡片显示题数/满分/答题次数（点击次数跳转该套题历史）；「＋ 导入套题」弹窗导入 JSON；「查看题目」为只读详情（可按题型筛选，正确答案高亮）；「删除套题」二次确认并提示历史保留。
 
 ## API
@@ -141,13 +148,18 @@ SKIP_MIGRATE=1 ./restart.sh
 |GET|`/api/papers`|套题列表，含 `question_count`、`max_score`、`attempt_count`、`last_attempt_at`|
 |GET|`/api/papers/:id/questions`|某套题全部题目（解析后的 options/answer），管理页详情复用|
 |POST|`/api/papers/import`|导入 `{ name, description, questions }`，同名覆盖|
-|DELETE|`/api/papers/:id`|删除套题（历史快照保留）|
+|DELETE|`/api/papers/:id`|删除套题（历史与错题快照保留）|
 |POST|`/api/attempts`|开始练习，返回 `attemptId`、`maxScore`|
 |POST|`/api/attempts/:id/answers`|提交单题，同时写入题目快照|
-|POST|`/api/attempts/:id/finish`|结束练习|
+|POST|`/api/attempts/:id/finish`|结束练习并收集本次已答错题（重复调用不重复计数）|
 |GET|`/api/attempts`|全部历史（不截断），含 `paper_exists`|
 |GET|`/api/attempts/:id`|历史详情，纯读快照；附 `paper_exists`、`current_paper_id`（继续作答时按它重新拉题）|
 |DELETE|`/api/attempts/:id`|删除一条历史及其作答|
+|GET|`/api/wrong-questions`|错题列表、待复习/已掌握统计、可续做的练习会话|
+|POST|`/api/wrong-questions/review-sessions`|创建随机错题练习（默认复用未完成会话，`restart:true` 重新洗牌）|
+|GET|`/api/wrong-questions/review-sessions/:id`|读取练习题目顺序与作答进度|
+|POST|`/api/wrong-questions/review-sessions/:id/answers`|提交一道错题：答对标记已掌握，答错次数 +1|
+|POST|`/api/wrong-questions/review-sessions/:id/finish`|结束错题练习（未答完也可结束）|
 
 ## 题目源与导入格式
 

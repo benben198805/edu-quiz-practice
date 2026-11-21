@@ -181,6 +181,41 @@
     background:#fff4e5;color:#b45309;margin-left:6px;
   }
 
+  /* ===== 错题集 ===== */
+  .wrong-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:14px;}
+  .wrong-head .card-h{margin-bottom:2px;}
+  .wrong-sub{font-size:12.5px;color:var(--muted);}
+  .review-resume{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+    padding:11px 14px;margin-bottom:14px;border-radius:11px;
+    background:#eef3ff;border:1px solid #c6d4f7;font-size:13px;color:#2c56c9;
+  }
+  .review-resume .rr-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .wrong-item{border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px;background:#fff;}
+  .wrong-item.mastered{background:#fbfcfd;}
+  .wrong-item .wi-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:7px;}
+  .wrong-item .wi-title{font-size:14px;font-weight:700;color:#111827;}
+  .wrong-item .wi-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted);}
+  .wrong-item .wi-stem{font-size:13.8px;color:#1f2937;white-space:pre-wrap;margin-bottom:9px;}
+  .wrong-item .wi-material{
+    border-left:3px solid #c6d4f7;background:#f7f9ff;border-radius:6px;
+    padding:8px 11px;margin-bottom:9px;font-size:12.7px;color:#374151;white-space:pre-wrap;
+  }
+  .wrong-opt{font-size:13px;color:#374151;padding:4px 9px;border-radius:7px;margin-bottom:4px;}
+  .wrong-opt .wo-key{font-weight:800;margin-right:6px;color:#4b5563;}
+  .wrong-opt.last-wrong{background:var(--wrong-bg);color:#a3262a;font-weight:600;}
+  .wrong-opt.last-wrong .wo-key{color:var(--wrong);}
+  .wrong-item .wi-foot{font-size:12.3px;color:var(--muted);margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;}
+  .tag-mastered{
+    display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;
+    background:var(--correct-bg);color:#0d8a45;border:1px solid #bfe9d2;
+  }
+  .tag-review{
+    display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;
+    background:#fff4e5;color:#b45309;border:1px solid #f3d9b0;
+  }
+  .q-source{font-size:12.5px;color:var(--muted);margin:-6px 0 10px;}
+
   /* ===== 答题 ===== */
   .q-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
   .q-num{font-weight:800;font-size:16px;color:var(--primary);}
@@ -364,7 +399,7 @@
     .qgrid{grid-template-columns:repeat(15,1fr);}
   }
   @media (max-width:560px){
-    /* 窄屏导航：隐藏品牌与上下文，三个入口等宽单行显示 */
+    /* 窄屏导航：隐藏品牌与上下文，四个入口等宽单行显示 */
     .topbar{gap:6px;padding:7px 8px;flex-wrap:nowrap;}
     .topbar .brand,.topbar .spacer,#navCtx{display:none;}
     .nav-btn{flex:1 1 0;min-width:0;padding:6px 4px;font-size:12.5px;white-space:nowrap;text-align:center;}
@@ -395,6 +430,7 @@
 <div class="topbar">
   <span class="brand">教育公共基础笔试</span>
   <button class="nav-btn active" id="navPapers" data-nav="papers">套题列表</button>
+  <button class="nav-btn" id="navWrong" data-nav="wrong">错题集</button>
   <button class="nav-btn" id="navHistory" data-nav="history">答题历史</button>
   <button class="nav-btn" id="navManage" data-nav="manage">套题管理</button>
   <span class="spacer"></span>
@@ -423,6 +459,31 @@
           <span class="count" id="historyCount"></span>
         </div>
         <div id="historyList"></div>
+      </div>
+    </div>
+
+    <!-- 错题集 -->
+    <div id="viewWrong" style="display:none;">
+      <div class="card">
+        <div class="wrong-head">
+          <div>
+            <div class="card-h">错题集</div>
+            <div class="wrong-sub" id="wrongSub"></div>
+          </div>
+          <button class="btn-primary btn-small" id="startWrongBtn" type="button">随机重做错题</button>
+        </div>
+        <div class="review-resume" id="wrongResume" style="display:none;"></div>
+        <div class="history-toolbar">
+          <label>筛选：
+            <select class="select-input" id="wrongFilterSelect">
+              <option value="active">待复习</option>
+              <option value="mastered">已掌握</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <span class="count" id="wrongCount"></span>
+        </div>
+        <div id="wrongList"></div>
       </div>
     </div>
 
@@ -458,6 +519,7 @@
           <span id="quizPaperName"></span>
           <span id="progressText"></span>
         </div>
+        <div class="q-source" id="quizSource" style="display:none;"></div>
         <div class="progress-outer"><div class="progress-inner" id="progressBar"></div></div>
 
         <div class="q-head">
@@ -589,9 +651,16 @@ let detailPaper = null;
 let detailQuestions = [];
 let detailFilter = "all";
 
+let WRONG_ITEMS = [];
+let wrongFilter = "active";
+let wrongActiveSession = null;
+
 let state = { index:0, answers:[], submitted:[], earned:[], saved:[], reopened:[] };
 // 答题来源：papers（新练习）/ history（继续未完成记录）
 let quizOrigin = "papers";
+// 答题模式：paper（整套练习）/ review（错题集随机练习）
+let quizMode = "paper";
+let reviewSessionId = null;
 
 function formatScore(n){
   const v = Math.round(Number(n) * 10) / 10;
@@ -605,7 +674,7 @@ function esc(s){
 
 /* ================= 视图切换 ================= */
 function showView(name){
-  ["viewPapers","viewHistory","viewManage","viewPaperDetail","viewQuiz","viewResult"].forEach(v=>{
+  ["viewPapers","viewWrong","viewHistory","viewManage","viewPaperDetail","viewQuiz","viewResult"].forEach(v=>{
     $(v).style.display = (v === name) ? "block" : "none";
   });
   // 侧边总览只在答题页显示
@@ -613,9 +682,10 @@ function showView(name){
 
   // 顶部导航高亮
   let nav = "papers";
-  if(name === "viewHistory") nav = "history";
+  if(name === "viewWrong") nav = "wrong";
+  else if(name === "viewHistory") nav = "history";
   else if(name === "viewManage" || name === "viewPaperDetail") nav = "manage";
-  else if(name === "viewResult") nav = (resultFrom === "quiz") ? "papers" : "history";
+  else if(name === "viewResult") nav = resultFrom === "quiz" ? "papers" : resultFrom;
   document.querySelectorAll(".nav-btn").forEach(b=>{
     b.classList.toggle("active", b.dataset.nav === nav);
   });
@@ -623,6 +693,7 @@ function showView(name){
 
 function setTab(tab){
   if(tab === "papers"){ loadPapers(); showView("viewPapers"); }
+  else if(tab === "wrong"){ loadWrong(); showView("viewWrong"); }
   else if(tab === "manage"){ loadManage(); showView("viewManage"); }
   else { loadHistory(); showView("viewHistory"); }
 }
@@ -630,9 +701,23 @@ function setTab(tab){
 /* 离开答题页前的确认；返回 true 表示可以离开 */
 async function confirmLeaveQuiz(where){
   if($("viewQuiz").style.display !== "none" && hasSubmittedAnswers()){
-    if(!confirm(`前往${where}将放弃当前未完成的作答（已提交的题会保留在历史记录中）。确定前往？`)) return false;
+    const msg = quizMode === "review"
+      ? `前往${where}将暂停本次错题练习，已提交的题目会保留进度，可稍后继续。确定前往？`
+      : `前往${where}将放弃当前未完成的作答（已提交的题会保留在历史记录中）。确定前往？`;
+    if(!confirm(msg)) return false;
   }
-  await discardEmptyAttempt();
+  if(quizMode === "review"){
+    // 一题未答就离开时关闭空会话，避免错题集一直显示 0/0 的“未完成”提示。
+    if(reviewSessionId && !hasSubmittedAnswers()){
+      const id = reviewSessionId;
+      reviewSessionId = null;
+      try{
+        await fetch(`/api/wrong-questions/review-sessions/${id}/finish`, {method:"POST"});
+      }catch(e){ console.warn(e); }
+    }
+  }else{
+    await discardEmptyAttempt();
+  }
   return true;
 }
 
@@ -1013,6 +1098,8 @@ async function enterPaper(paperId){
       reopened:new Array(QUESTIONS.length).fill(false)
     };
     quizOrigin = "papers";
+    quizMode = "paper";
+    reviewSessionId = null;
 
     // 先不创建练习记录：只有真正提交第一题时才写入数据库，
     // 这样“点进来看一眼就退出”不会产生历史记录。
@@ -1076,6 +1163,8 @@ async function resumeAttempt(id){
     state.index = firstUnanswered === -1 ? QUESTIONS.length - 1 : firstUnanswered;
     attemptId = data.attempt.id;
     quizOrigin = "history";
+    quizMode = "paper";
+    reviewSessionId = null;
 
     if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
 
@@ -1089,6 +1178,68 @@ async function resumeAttempt(id){
   }finally{
     $("loadingMask").classList.add("hidden");
   }
+}
+
+/* 进入错题练习：服务端已固定随机顺序，这里恢复进度与题目快照 */
+function enterReviewSession(data){
+  const items = Array.isArray(data.items) ? data.items : [];
+  if(!items.length) throw new Error("本次练习没有题目");
+
+  reviewSessionId = data.session.id;
+  quizMode = "review";
+  quizOrigin = "review";
+  attemptId = null;
+  currentPaper = { id: null, name: `错题集 · 随机 ${items.length} 题` };
+
+  QUESTIONS = items.map(item => ({
+    id: item.wrong_question_id,
+    seq: item.position,
+    source_seq: item.seq,
+    source_paper: item.paper_name,
+    type: item.type,
+    score: item.score,
+    material: item.material || "",
+    stem: item.stem,
+    options: item.options,
+    answer: item.answer,
+    analysis: item.analysis,
+    wrong_count: item.wrong_count,
+    mastered: item.mastered
+  }));
+  TOTAL_MAX = QUESTIONS.reduce((sum, q) => sum + Number(q.score), 0);
+  GROUPS = [{
+    key: "review",
+    label: `随机错题（1–${QUESTIONS.length}）`,
+    start: 0,
+    end: QUESTIONS.length - 1
+  }];
+
+  state = {
+    index: 0,
+    answers: new Array(QUESTIONS.length).fill(null),
+    submitted: new Array(QUESTIONS.length).fill(false),
+    earned: new Array(QUESTIONS.length).fill(0),
+    saved: new Array(QUESTIONS.length).fill(null),
+    reopened: new Array(QUESTIONS.length).fill(false)
+  };
+  QUESTIONS.forEach((q, i) => {
+    const item = items[i];
+    const chosen = Array.isArray(item.chosen) ? item.chosen : [];
+    state.answers[i] = chosen.length ? [...chosen] : null;
+    state.saved[i] = chosen.length ? [...chosen] : null;
+    state.submitted[i] = item.is_correct === 0 || item.is_correct === 1;
+    state.earned[i] = state.submitted[i] && item.is_correct ? Number(q.score) : 0;
+  });
+
+  const firstUnanswered = state.submitted.findIndex(s => !s);
+  state.index = firstUnanswered === -1 ? QUESTIONS.length - 1 : firstUnanswered;
+  if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
+
+  $("quizPaperName").textContent = currentPaper.name;
+  $("navCtx").textContent = `错题练习：已答 ${data.session.answered} / ${data.session.total}`;
+  showView("viewQuiz");
+  renderQuestion();
+  window.scrollTo({top:0, behavior:"smooth"});
 }
 
 function buildGroups(list){
@@ -1137,7 +1288,10 @@ function renderOverview(){
       cell.textContent = i+1;
       cell.setAttribute("role", "button");
       cell.tabIndex = 0;
-      cell.title = `第 ${i+1} 题` + (state.submitted[i] ? "（已作答，可跳转重新作答）" : "（点击跳转）");
+      const hint = state.submitted[i]
+        ? (quizMode === "review" ? "（已作答，可查看）" : "（已作答，可跳转重新作答）")
+        : "（点击跳转）";
+      cell.title = `第 ${i+1} 题` + hint;
       cell.addEventListener("click", ()=>jumpToQuestion(i));
       cell.addEventListener("keydown", e=>{
         if(e.key === "Enter" || e.key === " "){ e.preventDefault(); jumpToQuestion(i); }
@@ -1203,6 +1357,15 @@ function renderQuestion(){
   $("qBadge").className = "badge " + (typeBadgeClass[q.type] || "");
   $("qScoreTip").textContent = formatScore(q.score) + " 分";
   $("qStem").textContent = q.stem;
+  const source = $("quizSource");
+  if(quizMode === "review"){
+    source.style.display = "block";
+    source.textContent =
+      `来自「${q.source_paper || "（套题已删除）"}」第 ${q.source_seq} 题 ｜ 已做错 ${q.wrong_count} 次`;
+  }else{
+    source.style.display = "none";
+    source.textContent = "";
+  }
   const mat = $("qMaterial");
   mat.style.display = q.material ? "block" : "none";
   $("qMaterialText").textContent = q.material || "";
@@ -1225,7 +1388,7 @@ function renderQuestion(){
 
   $("submitBtn").style.display = locked ? "none" : "inline-block";
   $("nextBtn").style.display = locked ? "inline-block" : "none";
-  $("reanswerBtn").style.display = locked ? "inline-block" : "none";
+  $("reanswerBtn").style.display = (locked && quizMode !== "review") ? "inline-block" : "none";
   $("submitBtn").disabled = chosen.length === 0;
   $("submitBtn").textContent = "提交本题";
   $("nextBtn").textContent = (i === QUESTIONS.length-1) ? "查看总分与回顾 →" : "下一题 →";
@@ -1233,10 +1396,16 @@ function renderQuestion(){
   const rb = $("resultBox"); rb.innerHTML = ""; rb.className = "";
   if(locked){
     const ok = isCorrect(i);
+    const reviewNote = quizMode === "review"
+      ? (ok
+        ? `<div class="res-line">已标记为「已掌握」，后续错题练习不再抽取本题。</div>`
+        : `<div class="res-line">错误次数 +1，当前累计 <b>${q.wrong_count}</b> 次；本题仍保留在错题集。</div>`)
+      : "";
     rb.className = "result-box " + (ok?"ok":"no");
     rb.innerHTML = `
       <div class="res-title ${ok?'ok':'no'}">${ok?"✅ 回答正确":"❌ 回答错误"}　本题 ${ok?formatScore(q.score):"0"} 分</div>
       <div class="res-line">你的答案：<b>${(state.answers[i]||[]).sort().join("")||"（未选）"}</b>　｜　正确答案：<b class="c">${[...q.answer].sort().join("")}</b></div>
+      ${reviewNote}
       <div class="analysis"><span class="lbl">【解析】</span>${q.analysis}</div>
     `;
   } else if(reopened){
@@ -1289,6 +1458,7 @@ async function discardEmptyAttempt(){
 async function submitCurrent(){
   const i = state.index;
   if((state.submitted[i] && !state.reopened[i]) || !state.answers[i]) return;
+  if(quizMode === "review"){ await submitReviewCurrent(i); return; }
   const q = QUESTIONS[i];
   const btn = $("submitBtn"); btn.disabled = true; btn.textContent = "提交中…";
   try{
@@ -1311,6 +1481,36 @@ async function submitCurrent(){
   }
 }
 
+/* 错题练习提交：答对立即掌握，答错次数 +1，均由服务端落库 */
+async function submitReviewCurrent(i){
+  const q = QUESTIONS[i];
+  const btn = $("submitBtn"); btn.disabled = true; btn.textContent = "提交中…";
+  try{
+    const res = await fetch(`/api/wrong-questions/review-sessions/${reviewSessionId}/answers`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ wrongQuestionId: q.id, chosen: state.answers[i] })
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || `提交失败（HTTP ${res.status}）`);
+
+    state.submitted[i] = true;
+    state.earned[i] = data.isCorrect ? Number(q.score) : 0;
+    state.saved[i] = [...state.answers[i]];
+    state.reopened[i] = false;
+    q.wrong_count = Number(data.wrongCount) || q.wrong_count;
+    q.mastered = Number(data.mastered) || 0;
+    if(data.session){
+      $("navCtx").textContent = `错题练习：已答 ${data.session.answered} / ${data.session.total}`;
+    }
+  }catch(err){
+    alert("提交失败：" + err.message);
+  }finally{
+    btn.textContent = "提交本题"; btn.disabled = false;
+    renderQuestion();
+  }
+}
+
 function nextQuestion(){
   leaveReopened();
   if(state.index < QUESTIONS.length-1){
@@ -1325,6 +1525,37 @@ function nextQuestion(){
 /* ================= 答题结束 → 结果页 ================= */
 async function showSummary(){
   leaveReopened();
+
+  if(quizMode === "review"){
+    try{
+      await fetch(`/api/wrong-questions/review-sessions/${reviewSessionId}/finish`, {method:"POST"});
+    }catch(e){ console.warn(e); }
+    const reviewDetail = QUESTIONS.map((q,i)=>({
+      seq: q.seq, type:q.type, score:q.score, material:q.material || "", stem:q.stem, options:q.options,
+      answer:q.answer, analysis:q.analysis,
+      chosen: state.answers[i] || [],
+      is_correct: state.submitted[i] && isCorrect(i) ? 1 : 0,
+      earned: state.earned[i]
+    }));
+    const reviewEarned = state.earned.reduce((a,b)=>a+Number(b),0);
+    const reviewAnswered = state.submitted.filter(Boolean).length;
+    const reviewCorrect = state.submitted.filter((s,i)=>s && isCorrect(i)).length;
+    resultData = {
+      attempt: {
+        paper_name: currentPaper.name,
+        total_score: reviewEarned, max_score: TOTAL_MAX,
+        answered: reviewAnswered, correct: reviewCorrect
+      },
+      detail: reviewDetail
+    };
+    resultFrom = "wrong";
+    renderResult(resultData, "wrong");
+    $("navCtx").textContent = "";
+    showView("viewResult");
+    window.scrollTo({top:0, behavior:"smooth"});
+    return;
+  }
+
   if(attemptId){
     try{
       await fetch(`/api/attempts/${attemptId}/finish`, {method:"POST"});
@@ -1512,6 +1743,182 @@ async function openHistoryDetail(id){
   }
 }
 
+/* ================= 错题集 ================= */
+async function loadWrong(){
+  $("loadingMask").classList.remove("hidden");
+  $("navCtx").textContent = "";
+  try{
+    const res = await fetch("/api/wrong-questions");
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    WRONG_ITEMS = Array.isArray(data.items) ? data.items : [];
+    wrongActiveSession = data.active_session || null;
+    renderWrong();
+  }catch(err){
+    console.error("加载错题集失败：", err);
+    WRONG_ITEMS = [];
+    wrongActiveSession = null;
+    $("wrongSub").textContent = "";
+    $("wrongResume").style.display = "none";
+    $("wrongCount").textContent = "";
+    $("wrongList").innerHTML = `<div class="empty-hint">错题集暂时无法加载，请稍后刷新重试。</div>`;
+  }finally{
+    $("loadingMask").classList.add("hidden");
+  }
+}
+
+function renderWrong(){
+  const total = WRONG_ITEMS.length;
+  const mastered = WRONG_ITEMS.filter(item => item.mastered).length;
+  const active = total - mastered;
+  $("wrongSub").textContent = `共 ${total} 道 ｜ 待复习 ${active} 道 ｜ 已掌握 ${mastered} 道`;
+  $("startWrongBtn").textContent = wrongActiveSession ? "重新随机开始" : "随机重做错题";
+  $("startWrongBtn").disabled = active === 0;
+  $("startWrongBtn").title = active === 0
+    ? "暂无待复习错题"
+    : "把全部待复习错题打乱顺序做一遍";
+
+  const resumeBox = $("wrongResume");
+  if(wrongActiveSession){
+    const s = wrongActiveSession;
+    resumeBox.style.display = "flex";
+    resumeBox.innerHTML = `
+      <span>上次错题练习未完成：已答 ${s.answered} / ${s.total} 题，答对 ${s.correct} 题。</span>
+      <span class="rr-actions">
+        <button class="btn-primary btn-small" id="resumeWrongBtn" type="button">继续上次</button>
+        <button class="btn-ghost btn-small" id="restartWrongBtn" type="button">重新随机</button>
+      </span>
+    `;
+    $("resumeWrongBtn").addEventListener("click", resumeWrongReview);
+    $("restartWrongBtn").addEventListener("click", ()=>confirmRestartWrong());
+  }else{
+    resumeBox.style.display = "none";
+    resumeBox.innerHTML = "";
+  }
+
+  const list = WRONG_ITEMS.filter(item => {
+    if(wrongFilter === "active") return !item.mastered;
+    if(wrongFilter === "mastered") return !!item.mastered;
+    return true;
+  });
+  $("wrongCount").textContent = `显示 ${list.length} 道 / 共 ${total} 道`;
+  const box = $("wrongList");
+  box.innerHTML = "";
+  if(!list.length){
+    box.innerHTML = `<div class="empty-hint">${
+      total === 0
+        ? "还没有错题。完成整套练习后，答错的题目会自动收录到这里。"
+        : "当前筛选下没有错题。"
+    }</div>`;
+    return;
+  }
+
+  list.forEach(item => {
+    const card = document.createElement("div");
+    card.className = "wrong-item" + (item.mastered ? " mastered" : "");
+
+    const head = document.createElement("div");
+    head.className = "wi-head";
+    const title = document.createElement("div");
+    title.className = "wi-title";
+    title.textContent = `${item.paper_name || "（未记录套题）"} · 第 ${item.seq} 题`;
+    if(!item.paper_exists){
+      const del = document.createElement("span");
+      del.className = "tag-deleted";
+      del.textContent = "套题已删除";
+      title.appendChild(del);
+    }
+    const meta = document.createElement("div");
+    meta.className = "wi-meta";
+    const badge = document.createElement("span");
+    badge.className = "badge " + (typeBadgeClass[item.type] || "");
+    badge.textContent = typeLabel[item.type] || item.type;
+    const status = document.createElement("span");
+    status.className = item.mastered ? "tag-mastered" : "tag-review";
+    status.textContent = item.mastered ? "已掌握" : "待复习";
+    const count = document.createElement("span");
+    count.textContent = `做错 ${item.wrong_count} 次`;
+    meta.append(badge, status, count);
+    head.append(title, meta);
+
+    card.appendChild(head);
+    if(item.material){
+      const material = document.createElement("div");
+      material.className = "wi-material";
+      material.textContent = `【案例材料】${item.material}`;
+      card.appendChild(material);
+    }
+    const stem = document.createElement("div");
+    stem.className = "wi-stem";
+    stem.textContent = item.stem;
+    card.appendChild(stem);
+
+    const lastChosen = Array.isArray(item.last_chosen) ? item.last_chosen : [];
+    item.options.forEach(([key, text]) => {
+      const opt = document.createElement("div");
+      opt.className = "wrong-opt" + (lastChosen.includes(key) ? " last-wrong" : "");
+      const k = document.createElement("span");
+      k.className = "wo-key";
+      k.textContent = key + ".";
+      opt.append(k, document.createTextNode(text));
+      if(lastChosen.includes(key)) opt.append(document.createTextNode("　（上次错选）"));
+      card.appendChild(opt);
+    });
+
+    const foot = document.createElement("div");
+    foot.className = "wi-foot";
+    const chosenText = document.createElement("span");
+    chosenText.textContent = `上次错选：${lastChosen.slice().sort().join("") || "—"}`;
+    const timeText = document.createElement("span");
+    timeText.textContent = `最近做错：${item.last_wrong_at || "—"}`;
+    foot.append(chosenText, timeText);
+    card.appendChild(foot);
+
+    box.appendChild(card);
+  });
+}
+
+function confirmRestartWrong(){
+  const tip = wrongActiveSession
+    ? "重新开始会丢弃上次未完成的错题练习进度，确定吗？"
+    : "确定把全部待复习错题重新随机打乱开始吗？";
+  if(!confirm(tip)) return;
+  startWrongReview(true);
+}
+
+async function startWrongReview(restart=false){
+  $("loadingMask").classList.remove("hidden");
+  try{
+    const res = await fetch("/api/wrong-questions/review-sessions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ restart })
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || `开始失败（HTTP ${res.status}）`);
+    enterReviewSession(data);
+  }catch(err){
+    alert("开始错题练习失败：" + err.message);
+  }finally{
+    $("loadingMask").classList.add("hidden");
+  }
+}
+
+async function resumeWrongReview(){
+  if(!wrongActiveSession) return;
+  $("loadingMask").classList.remove("hidden");
+  try{
+    const res = await fetch(`/api/wrong-questions/review-sessions/${wrongActiveSession.id}`);
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error || `加载失败（HTTP ${res.status}）`);
+    enterReviewSession(data);
+  }catch(err){
+    alert("继续错题练习失败：" + err.message);
+  }finally{
+    $("loadingMask").classList.add("hidden");
+  }
+}
+
 /* ================= 结果页渲染 ================= */
 function renderResult(data, from){
   const att = data.attempt;
@@ -1543,8 +1950,10 @@ function renderResult(data, from){
     grid.appendChild(cell);
   });
 
+  $("backFromResult").textContent = from === "wrong" ? "← 返回错题集" : "← 返回列表";
   $("backFromResult").onclick = ()=>{
     if(from === "quiz"){ setTab("papers"); }
+    else if(from === "wrong"){ setTab("wrong"); }
     else { setTab("history"); }
   };
 
@@ -1558,7 +1967,7 @@ function renderResult(data, from){
   };
 
   // 作答结束默认只看错题；从历史打开时看全部
-  currentFilter = (from === "quiz") ? "wrong" : "all";
+  currentFilter = (from === "quiz" || from === "wrong") ? "wrong" : "all";
   document.querySelectorAll("#viewResult .filter-btn").forEach(b=>b.classList.remove("active","green","red"));
   const activeFilter = document.querySelector(`#viewResult .filter-btn[data-filter="${currentFilter}"]`);
   if(activeFilter){
@@ -1676,6 +2085,10 @@ $("navPapers").addEventListener("click", async ()=>{
   if(!await confirmLeaveQuiz("套题列表")) return;
   setTab("papers");
 });
+$("navWrong").addEventListener("click", async ()=>{
+  if(!await confirmLeaveQuiz("错题集")) return;
+  setTab("wrong");
+});
 $("navHistory").addEventListener("click", async ()=>{
   if(!await confirmLeaveQuiz("答题历史")) return;
   setTab("history");
@@ -1689,6 +2102,14 @@ $("historyPaperFilter").addEventListener("change", (e)=>{
   historyFilter = e.target.value;
   $("navCtx").textContent = historyFilter ? "答题历史：" + historyFilter : "";
   renderHistoryList();
+});
+$("wrongFilterSelect").addEventListener("change", (e)=>{
+  wrongFilter = e.target.value;
+  renderWrong();
+});
+$("startWrongBtn").addEventListener("click", ()=>{
+  if(wrongActiveSession){ confirmRestartWrong(); return; }
+  startWrongReview(false);
 });
 $("detailBack").addEventListener("click", ()=>setTab("manage"));
 $("importBtn").addEventListener("click", importPaper);
