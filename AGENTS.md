@@ -151,8 +151,8 @@ SKIP_MIGRATE=1 ./restart.sh
 
 ## 题目源与导入格式
 
-- 源文件：`papers_data/paper-NN.json`（进阶版 01–20，每套 90 题）与 `papers_data/paper-high-NN.json`（高阶版 01–05，每套 98 题）；命名对应「第 N 套」或「高阶版第 N 套」。
-- 高阶版末尾 8 题为案例分析题：`type: "case"`，每题自带 `material` 案例材料（同一材料可被多题复用），作答为多选。
+- 源文件：`papers_data/paper-NN.json`（进阶版 01–15 每套 90 题，16–20 每套 98 题）与 `papers_data/paper-high-NN.json`（高阶版 01–05，每套 98 题）；命名对应「第 N 套」或「高阶版第 N 套」。
+- 进阶版 16–20 与高阶版末尾 8 题为案例分析题：`type: "case"`，每题自带 `material` 案例材料（同一材料可被多题复用），作答为多选。进阶版案例分析题的原始片段保存在 `papers_data/case-16.json` … `case-20.json`，已合并进对应 `paper-NN.json`（seq 91–98，满分 100）。
 - 结构：题目数组；也接受 `{ name, description, questions }` 对象。
 - 单题字段：
 
