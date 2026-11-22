@@ -170,7 +170,7 @@ function normalizeQuestions(input) {
     return { questions: [], errors: ["题目数组为空"] };
   }
 
-  // case：案例分析题，题面依赖可独立阅读的材料（material），作答为多选
+  // case：案例分析题，题面依赖可独立阅读的材料（material），作答可多选；正确答案允许只有 1 个
   const validTypes = new Set(["judge", "single", "multi", "case"]);
   const out = [];
 
@@ -229,8 +229,8 @@ function normalizeQuestions(input) {
       errors.push(`第 ${n} 题：${type === "judge" ? "判断题" : "单选题"} 只能有 1 个正确答案`);
       return;
     }
-    if ((type === "multi" || type === "case") && answer.length < 2) {
-      errors.push(`第 ${n} 题：${type === "multi" ? "多项选择题" : "案例分析题"}至少要有 2 个正确答案`);
+    if (type === "multi" && answer.length < 2) {
+      errors.push(`第 ${n} 题：多项选择题至少要有 2 个正确答案`);
       return;
     }
 
