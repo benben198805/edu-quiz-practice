@@ -259,6 +259,25 @@
   .opt.correct .marker{background:var(--correct);color:#fff;border-color:var(--correct);}
   .opt.wrong .marker{background:var(--wrong);color:#fff;border-color:var(--wrong);}
 
+  mark.hl{
+    background:rgba(255,224,74,.62);color:inherit;border-radius:3px;padding:0 1px;
+    -webkit-box-decoration-break:clone;box-decoration-break:clone;
+  }
+  .hl-tools{
+    position:fixed;z-index:1100;display:none;align-items:center;gap:6px;
+  }
+  .hl-btn{
+    display:inline-flex;align-items:center;
+    padding:7px 13px;font-size:13px;font-weight:700;line-height:1.2;
+    color:#7a4b00;background:#fffbe6;border:1px solid #efcf69;
+    border-radius:999px;box-shadow:0 4px 16px rgba(31,41,55,.22);
+    cursor:pointer;user-select:none;-webkit-user-select:none;
+    touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  }
+  .hl-btn:hover{background:#fff4c2;}
+  .hl-btn.secondary{color:#4b5563;background:#fff;border-color:#d5dbe6;}
+  .hl-btn.secondary:hover{background:#f5f7fb;}
+
   .actions{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap;}
   button{
     font-family:inherit;font-size:14.5px;font-weight:600;border-radius:10px;
@@ -417,7 +436,7 @@
   @media print{
     @page{margin:14mm;}
     body{background:#fff;padding:0;}
-    .topbar,.layout{display:none !important;}
+    .topbar,.layout,.hl-tools{display:none !important;}
     #printArea{display:block;}
   }
 </style>
@@ -628,6 +647,11 @@
 
 <div id="printArea"></div>
 
+<div class="hl-tools" id="hlTools">
+  <button class="hl-btn" id="hlBtn" type="button" aria-label="将选中的文字标黄">标黄</button>
+  <button class="hl-btn secondary" id="unhlBtn" type="button" aria-label="取消选中文字的标黄">取消标记</button>
+</div>
+
 <script>
 /* ================= 全局状态 ================= */
 const typeLabel = {judge:"判断题", single:"单选题", multi:"多项选择题", case:"案例分析题"};
@@ -662,6 +686,17 @@ let quizOrigin = "papers";
 let quizMode = "paper";
 let reviewSessionId = null;
 
+/* 划词标黄：只存在当前题的内存里，切题即清空 */
+const hlTools = $("hlTools");
+const hlBtn = $("hlBtn");
+const unhlBtn = $("unhlBtn");
+let highlights = [];
+let highlightQuestion = -1;
+let pendingHighlight = null;
+let hlUpdateRaf = 0;
+let optionDown = null;
+let suppressOptionClick = false;
+
 function formatScore(n){
   const v = Math.round(Number(n) * 10) / 10;
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
@@ -679,6 +714,7 @@ function showView(name){
   });
   // 侧边总览只在答题页显示
   $("sideOverview").style.display = (name === "viewQuiz") ? "block" : "none";
+  if(name !== "viewQuiz") hideHighlightButton();
 
   // 顶部导航高亮
   let nav = "papers";
@@ -1104,6 +1140,7 @@ async function enterPaper(paperId){
     // 先不创建练习记录：只有真正提交第一题时才写入数据库，
     // 这样“点进来看一眼就退出”不会产生历史记录。
     attemptId = null;
+    resetHighlights();
 
     // 手机端总览默认收成浮动圆钮
     if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
@@ -1165,6 +1202,7 @@ async function resumeAttempt(id){
     quizOrigin = "history";
     quizMode = "paper";
     reviewSessionId = null;
+    resetHighlights();
 
     if(smallScreenMQ.matches) ovCard.classList.add("collapsed");
 
@@ -1237,6 +1275,7 @@ function enterReviewSession(data){
 
   $("quizPaperName").textContent = currentPaper.name;
   $("navCtx").textContent = `错题练习：已答 ${data.session.answered} / ${data.session.total}`;
+  resetHighlights();
   showView("viewQuiz");
   renderQuestion();
   window.scrollTo({top:0, behavior:"smooth"});
@@ -1344,9 +1383,283 @@ function isCorrect(i){
   return [...a].sort().join("") === [...q.answer].sort().join("");
 }
 
+/* ================= 划词标黄 ================= */
+function isQuizVisible(){
+  return $("viewQuiz").style.display !== "none";
+}
+
+/* 当前题允许标黄的文本块：案例材料、题干、选项文字 */
+function getHighlightBlocks(){
+  if(!isQuizVisible()) return [];
+  const blocks = [];
+  const mat = $("qMaterial");
+  if(mat && mat.style.display !== "none"){
+    const text = $("qMaterialText");
+    if(text) blocks.push({key:"material", root:mat, text});
+  }
+  const stem = $("qStem");
+  if(stem) blocks.push({key:"stem", root:stem, text:stem});
+  $("options").querySelectorAll(".opt").forEach(opt=>{
+    const marker = opt.querySelector(".marker");
+    const text = opt.querySelector(".opt-text");
+    if(marker && text) blocks.push({key:"opt:" + marker.textContent.trim(), root:opt, text});
+  });
+  return blocks;
+}
+
+function rangeInside(range, root){
+  const box = document.createRange();
+  box.selectNodeContents(root);
+  return range.compareBoundaryPoints(Range.START_TO_START, box) >= 0 &&
+         range.compareBoundaryPoints(Range.END_TO_END, box) <= 0;
+}
+
+/* 把选区边界换算成 textRoot 内的字符偏移；边界在 textRoot 之前/之后时贴到 0/末尾 */
+function offsetInBlock(textRoot, node, offset){
+  if(textRoot.contains(node)){
+    const r = document.createRange();
+    r.selectNodeContents(textRoot);
+    try{ r.setEnd(node, offset); }catch(e){ return 0; }
+    return r.toString().length;
+  }
+  const point = document.createRange();
+  try{ point.setStart(node, offset); }catch(e){ return 0; }
+  point.collapse(true);
+  const box = document.createRange();
+  box.selectNodeContents(textRoot);
+  return point.compareBoundaryPoints(Range.START_TO_START, box) < 0
+    ? 0
+    : (textRoot.textContent || "").length;
+}
+
+function trimHighlightOffsets(text, start, end){
+  while(start < end && /\s/.test(text.charAt(start))) start++;
+  while(end > start && /\s/.test(text.charAt(end - 1))) end--;
+  return {start, end};
+}
+
+/* 选区必须完整落在一个文本块（或一个选项行）里，跨块不处理 */
+function findHighlightTarget(range){
+  const blocks = getHighlightBlocks();
+  for(const b of blocks){
+    if(!rangeInside(range, b.root)) continue;
+    const text = b.text.textContent || "";
+    let start = offsetInBlock(b.text, range.startContainer, range.startOffset);
+    let end = offsetInBlock(b.text, range.endContainer, range.endOffset);
+    ({start, end} = trimHighlightOffsets(text, start, end));
+    if(end > start) return {key:b.key, start, end};
+  }
+  return null;
+}
+
+function positionHighlightButton(range){
+  const rects = Array.from(range.getClientRects()).filter(r=>r.width > 0 && r.height > 0);
+  if(!rects.length){ hideHighlightButton(); return; }
+  const last = rects[rects.length - 1];
+  if(last.bottom < 0 || last.top > window.innerHeight){ hideHighlightButton(); return; }
+
+  hlTools.style.display = "flex";
+  const bw = hlTools.offsetWidth || 60;
+  const bh = hlTools.offsetHeight || 32;
+  const coarse = window.matchMedia("(pointer: coarse)").matches;
+  let left = last.right + 8;
+  let top = coarse ? last.bottom + 8 : last.top - bh - 6;
+  if(left + bw > window.innerWidth - 8) left = window.innerWidth - bw - 8;
+  if(left < 8) left = 8;
+  if(top < 8) top = last.bottom + 8;
+  if(top + bh > window.innerHeight - 8) top = Math.max(8, window.innerHeight - bh - 8);
+  hlTools.style.left = left + "px";
+  hlTools.style.top = top + "px";
+}
+
+function hideHighlightButton(){
+  hlTools.style.display = "none";
+}
+
+function updateHighlightButton(){
+  if(!isQuizVisible()){ hideHighlightButton(); return; }
+  const sel = window.getSelection();
+  if(!sel || sel.rangeCount === 0 || sel.isCollapsed){ hideHighlightButton(); return; }
+  const range = sel.getRangeAt(0);
+  const target = findHighlightTarget(range);
+  if(!target){ hideHighlightButton(); return; }
+  pendingHighlight = target;
+  const canCancel = highlights.some(h =>
+    h.key === target.key && h.start < target.end && h.end > target.start
+  );
+  unhlBtn.style.display = canCancel ? "inline-flex" : "none";
+  positionHighlightButton(range);
+}
+
+function scheduleHighlightButtonUpdate(){
+  if(hlUpdateRaf) return;
+  hlUpdateRaf = requestAnimationFrame(()=>{
+    hlUpdateRaf = 0;
+    updateHighlightButton();
+  });
+}
+
+function addHighlight(key, start, end){
+  const ranges = highlights.filter(h=>h.key === key).concat([{start, end}]);
+  ranges.sort((a, b)=>a.start - b.start || a.end - b.end);
+  const merged = [];
+  ranges.forEach(r=>{
+    const last = merged[merged.length - 1];
+    if(last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else merged.push({start:r.start, end:r.end});
+  });
+  highlights = highlights.filter(h=>h.key !== key)
+    .concat(merged.map(r=>({key, start:r.start, end:r.end})));
+}
+
+/* 只扣掉选中的那一段：现有高亮被切成左右两段 */
+function removeHighlightRange(key, start, end){
+  const next = [];
+  highlights.forEach(h=>{
+    if(h.key !== key || h.end <= start || h.start >= end){
+      next.push(h);
+      return;
+    }
+    if(h.start < start) next.push({key, start:h.start, end:start});
+    if(h.end > end) next.push({key, start:end, end:h.end});
+  });
+  highlights = next;
+}
+
+function renderTextMarks(textRoot, ranges){
+  const text = textRoot.textContent || "";
+  const sorted = ranges
+    .map(r=>({
+      start:Math.max(0, Math.min(text.length, r.start)),
+      end:Math.max(0, Math.min(text.length, r.end))
+    }))
+    .filter(r=>r.end > r.start)
+    .sort((a, b)=>a.start - b.start);
+
+  const frag = document.createDocumentFragment();
+  let pos = 0;
+  sorted.forEach(r=>{
+    if(r.end <= pos) return;
+    const start = Math.max(r.start, pos);
+    if(start > pos) frag.appendChild(document.createTextNode(text.slice(pos, start)));
+    const mark = document.createElement("mark");
+    mark.className = "hl";
+    mark.textContent = text.slice(start, r.end);
+    frag.appendChild(mark);
+    pos = r.end;
+  });
+  if(pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+  textRoot.textContent = "";
+  textRoot.appendChild(frag);
+}
+
+function applyHighlights(){
+  if(!highlights.length) return;
+  const blocks = new Map(getHighlightBlocks().map(b=>[b.key, b]));
+  const grouped = new Map();
+  highlights.forEach(h=>{
+    if(!grouped.has(h.key)) grouped.set(h.key, []);
+    grouped.get(h.key).push(h);
+  });
+  grouped.forEach((ranges, key)=>{
+    const block = blocks.get(key);
+    if(block && block.text) renderTextMarks(block.text, ranges);
+  });
+}
+
+function capturePendingHighlight(){
+  const sel = window.getSelection();
+  if(sel && !sel.isCollapsed){
+    const target = findHighlightTarget(sel.getRangeAt(0));
+    if(target) pendingHighlight = target;
+  }
+}
+
+function applyPendingHighlight(){
+  capturePendingHighlight();
+  if(!pendingHighlight) return;
+  const target = pendingHighlight;
+  pendingHighlight = null;
+  addHighlight(target.key, target.start, target.end);
+  applyHighlights();
+  const sel = window.getSelection();
+  if(sel) sel.removeAllRanges();
+  hideHighlightButton();
+}
+
+function removePendingHighlight(){
+  capturePendingHighlight();
+  if(!pendingHighlight) return;
+  const target = pendingHighlight;
+  pendingHighlight = null;
+  removeHighlightRange(target.key, target.start, target.end);
+  const block = getHighlightBlocks().find(b=>b.key === target.key);
+  if(block && block.text) renderTextMarks(block.text, highlights.filter(h=>h.key === target.key));
+  const sel = window.getSelection();
+  if(sel) sel.removeAllRanges();
+  hideHighlightButton();
+}
+
+function resetHighlights(){
+  highlights = [];
+  highlightQuestion = -1;
+  pendingHighlight = null;
+  hideHighlightButton();
+}
+
+/* 拖拽选字后浏览器可能补发一次 click，不能让它把选项选上 */
+function noteOptionDown(x, y){
+  optionDown = {x, y};
+  suppressOptionClick = false;
+}
+function noteOptionUp(x, y){
+  if(!optionDown) return;
+  if(Math.hypot(x - optionDown.x, y - optionDown.y) > 6) suppressOptionClick = true;
+  optionDown = null;
+}
+
+document.addEventListener("selectionchange", scheduleHighlightButtonUpdate);
+document.addEventListener("mousedown", e=>noteOptionDown(e.clientX, e.clientY));
+document.addEventListener("mouseup", e=>{
+  noteOptionUp(e.clientX, e.clientY);
+  scheduleHighlightButtonUpdate();
+});
+document.addEventListener("touchstart", e=>{
+  const t = e.touches[0];
+  if(t) noteOptionDown(t.clientX, t.clientY);
+}, {passive:true});
+document.addEventListener("touchend", e=>{
+  const t = e.changedTouches[0];
+  if(t) noteOptionUp(t.clientX, t.clientY);
+  scheduleHighlightButtonUpdate();
+}, {passive:true});
+window.addEventListener("scroll", scheduleHighlightButtonUpdate, {passive:true});
+window.addEventListener("resize", scheduleHighlightButtonUpdate);
+
+function activateHighlightButton(e){
+  if(e) e.preventDefault();
+  applyPendingHighlight();
+}
+function activateUnhighlightButton(e){
+  if(e) e.preventDefault();
+  removePendingHighlight();
+}
+hlBtn.addEventListener("touchstart", activateHighlightButton, {passive:false});
+hlBtn.addEventListener("mousedown", activateHighlightButton);
+hlBtn.addEventListener("click", activateHighlightButton);
+unhlBtn.addEventListener("touchstart", activateUnhighlightButton, {passive:false});
+unhlBtn.addEventListener("mousedown", activateUnhighlightButton);
+unhlBtn.addEventListener("click", activateUnhighlightButton);
+
 function renderQuestion(){
   const i = state.index, q = QUESTIONS[i];
   if(!q){ showSummary(); return; }
+  if(i !== highlightQuestion){
+    highlights = [];
+    highlightQuestion = i;
+  }
+  pendingHighlight = null;
+  hideHighlightButton();
   const submitted = state.submitted[i];
   const reopened = !!state.reopened[i];
   const locked = submitted && !reopened;
@@ -1381,8 +1694,18 @@ function renderQuestion(){
       if(q.answer.includes(key)) div.classList.add("correct");
       else if(chosen.includes(key)) div.classList.add("wrong");
     } else if(chosen.includes(key)) div.classList.add("selected");
-    div.innerHTML = `<span class="marker">${key}</span><span>${text}</span>`;
-    if(!locked) div.addEventListener("click", ()=>toggleOption(key));
+    div.innerHTML = `<span class="marker">${key}</span><span class="opt-text">${text}</span>`;
+    if(!locked){
+      div.addEventListener("click", ()=>{
+        if(suppressOptionClick){
+          suppressOptionClick = false;
+          return;
+        }
+        const sel = window.getSelection();
+        if(sel && !sel.isCollapsed && div.contains(sel.anchorNode) && div.contains(sel.focusNode)) return;
+        toggleOption(key);
+      });
+    }
     opts.appendChild(div);
   });
 
@@ -1414,6 +1737,7 @@ function renderQuestion(){
   }
 
   renderOverview();
+  applyHighlights();
 }
 
 function toggleOption(key){
