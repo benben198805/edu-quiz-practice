@@ -10,7 +10,8 @@
     "start": "node server.js",
     "dev": "npm run db:migrate && node server.js",
     "db:migrate": "node scripts/migrate.js",
-    "db:status": "node scripts/migrate.js --status"
+    "db:status": "node scripts/migrate.js --status",
+    "paper:upload": "node scripts/upload-paper.js"
   },
   "dependencies": {
     "dotenv": "^16.6.1",

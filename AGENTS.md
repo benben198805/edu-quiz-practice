@@ -34,6 +34,7 @@
 │   ├── V4__add_case_material.sql 案例分析题：questions/answers 增加 material 列
 │   └── V5__add_wrong_questions.sql 错题集与随机练习会话，并回填已完成历史错题
 ├── scripts/migrate.js        迁移执行器（migrate / --status）
+├── scripts/upload-paper.js   线上导入题目（POST /api/papers/import）
 ├── public/index.html         唯一前端文件：样式、页面、全部交互
 ├── papers_data/              题目源 JSON（paper-01.json … paper-20.json）
 ├── Dockerfile                云托管镜像
@@ -182,7 +183,8 @@ SKIP_MIGRATE=1 ./restart.sh
 
 - 导入校验（`server.js` 的 `normalizeQuestions()`）：`type` 四选一；`score` 非负数字；`stem` 非空；`case` 必须提供非空 `material`；至少 2 个选项且字母不重复；`answer` 非空、必须是已有选项；判断/单选恰好 1 个正确答案，多选至少 2 个，案例分析至少 1 个。不通过返回 400 + 逐条错误，事务回滚、不落库。
 - 导入后题号按数组顺序重排为 `seq = 1..N`。
-- 所有套题统一通过「套题管理 → 导入套题」入库；`papers_data/` 只是源文件存档，服务不会自动扫描。重名导入会按 seq 覆盖该套题题目，历史快照不受影响。
+- 所有套题通过「套题管理 → 导入套题」或线上导入脚本入库；`papers_data/` 只是源文件存档，服务不会自动扫描。重名导入会按 seq 覆盖该套题题目，历史快照不受影响。
+- 线上导入脚本：`npm run paper:upload -- papers_data/paper-21.json --name "第 21 套" [--description "…"] [--dry-run]`。直接调用线上 `POST /api/papers/import`，默认地址为 `https://express-5tx0-349536-13-1534869626.sh.run.tcloudbase.com`，可用 `--base-url` 或 `EDUQUIZ_BASE_URL` 覆盖；名称/描述也可写在 JSON 对象的 `name`/`description` 字段。请求体上限 8MB。
 
 ## 运维
 
